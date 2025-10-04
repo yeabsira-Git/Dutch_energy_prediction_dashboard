@@ -92,7 +92,8 @@ def create_features(df):
     return df
 
 # --- 3. DATA LOADING AND VISUALIZATION PREP ---
-def load_and_preprocess_data():
+# --- CRITICAL FIX: Encode Categorical Features ---
+  
     """Loads and prepares the historical data, including CRITICAL categorical encoding."""
     try:
         df = pd.read_csv(DATA_PATH) 
@@ -104,7 +105,7 @@ def load_and_preprocess_data():
 
     # --- CRITICAL FIX: Encode Categorical Features ---
     df = encode_categoricals(df)
-
+    df.columns = sanitize_feature_names(df.columns)
     # Use the consistent, sanitized column name for the temperature column
     df['Temperature_C'] = df[TEMP_COL] / 10
     df['Hour'] = df.index.hour
