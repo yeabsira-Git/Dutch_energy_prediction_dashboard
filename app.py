@@ -46,14 +46,37 @@ st.header("1. Model Forecast and Capacity Alert")
 forecast_df = generate_forecast(data, n_hours=n_hours_forecast)
 
 if not forecast_df.empty:
-    fig_forecast = px.line(
-        forecast_df,
-        y='Predicted_Demand_MW',
-        title=f'Predicted Energy Demand (MW) for the next {n_hours_forecast} hours',
-        labels={'Predicted_Demand_MW': 'Demand (MW)'},
-        template='plotly_white',
+    
+    # 1. PREP DATA: Get historical Demand (last 72 hours) and the Forecast
+    # Note: We assume the index is the datetime for both.
+    historical_demand = data['Demand_MW'].tail(72).rename('Demand (MW)')
+    predicted_demand = forecast_df['Predicted_Demand_MW'].rename('Demand (MW)')
+    
+    # 2. COMBINE: Concatenate the historical and predicted data
+    data_to_plot = pd.concat([historical_demand, predicted_demand])
+    
+    # 3. CREATE PLOT DATAFRAME: Reset index for Plotly
+    data_to_plot = data_to_plot.reset_index().rename(columns={'index': 'Time'})
+    
+    # Add a column to distinguish historical vs. forecast for better plotting
+    data_to_plot['Type'] = np.where(
+        data_to_plot['Time'] <= historical_demand.index.max(), 
+        'Historical Demand', 
+        'Predicted Demand'
     )
     
+    # 4. GENERATE PLOTLY FIGURE
+    fig_forecast = px.line(
+        data_to_plot,
+        x='Time',
+        y='Demand (MW)',
+        color='Type', # Use 'Type' to color the historical vs. forecast line
+        title=f'Energy Demand: Historical Context and {n_hours_forecast}-Hour Forecast (MW)',
+        template='plotly_white',
+        color_discrete_map={'Historical Demand': 'blue', 'Predicted Demand': 'red'}
+    )
+    
+    # Add the capacity limit line
     fig_forecast.add_hline(
         y=demand_threshold, 
         line_dash="dash", 
@@ -64,11 +87,12 @@ if not forecast_df.empty:
 
     st.plotly_chart(fig_forecast, use_container_width=True)
     
+    # Check for shortages (this logic remains the same)
     shortage_hours = forecast_df[forecast_df['Predicted_Demand_MW'] > demand_threshold]
     if not shortage_hours.empty:
         st.error(f"⚠️ **SHORTAGE ALERT:** {len(shortage_hours)} hours are predicted to exceed the {demand_threshold} MW capacity limit.")
     else:
-        st.success("✅ Forecast is currently below the supply capacity limit.")
+        st.success("✅ Forecast is currently below the supply capacity limit."
 
 
 # --- 5. DRIVER ANALYSIS PLOT ---
