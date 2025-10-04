@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore") # Suppress minor warnings
 
 # --- 1. CONFIGURATION AND CONSTANTS ---
 MODEL_PATH = 'lgbm_model.pkl'
-DATA_PATH = 'merge_data_for_app.csv' # <-- FIXED: Corrected name (singular 'merge')
+DATA_PATH = 'merged_data_for_app.csv' # <-- FIXED: Corrected name (singular 'merge')
 TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)' # Using sanitized name for consistency
 
