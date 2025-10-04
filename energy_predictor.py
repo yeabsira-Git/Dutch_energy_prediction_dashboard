@@ -93,7 +93,7 @@ def create_features(df):
 
 # --- 3. DATA LOADING AND VISUALIZATION PREP ---
 # --- CRITICAL FIX: Encode Categorical Features ---
-  
+  def load_and_preprocess_data():
     """Loads and prepares the historical data, including CRITICAL categorical encoding."""
     try:
         df = pd.read_csv(DATA_PATH) 
