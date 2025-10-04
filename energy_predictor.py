@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore") # Suppress minor warnings
 MODEL_PATH = 'lgbm_model.pkl'
 DATA_PATH = 'merged_data_for_app.csv' # <--- FIXED: Now points to your actual data file name
 TARGET_COL = 'Demand_MW'
-TEMP_COL = 'Temperature_0_1_degrees_Celsius'
+TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 
 # Define the features list (must match the model training features)
 FEATURES = [
