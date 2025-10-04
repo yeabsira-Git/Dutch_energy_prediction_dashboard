@@ -6,16 +6,14 @@ import lightgbm as lgb
 import joblib 
 import re
 import warnings
-warnings.filterwarnings("ignore") # Suppress minor warnings
+warnings.filterwarnings("ignore") 
 
 # --- 1. CONFIGURATION AND CONSTANTS ---
 MODEL_PATH = 'lgbm_model.pkl'
-DATA_PATH = 'merged_data_for_app.csv' # <-- FIXED: Corrected name (singular 'merge')
+DATA_PATH = 'merged_data_for_app.csv' 
 TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)' # Using sanitized name for consistency
 
-# The exact 50 features used for training (ORDER MATTERS!)
-# The list is based on your final debug output.
 FEATURES = [
     'Cov_ratio', 'Wind_Direction_degrees',
     'Hourly_Mean_Wind_Speed_0_1_m_s', 'Mean_Wind_Speed_0_1_m_s',
@@ -91,9 +89,6 @@ def create_features(df):
     
     return df
 
-# --- 3. DATA LOADING AND VISUALIZATION PREP ---
-# --- CRITICAL FIX: Encode Categorical Features ---
-# energy_predictor.py (around line 95)
 
 # --- 3. DATA LOADING AND VISUALIZATION PREP ---
 def load_and_preprocess_data():
