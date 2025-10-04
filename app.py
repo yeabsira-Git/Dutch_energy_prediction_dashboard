@@ -92,7 +92,7 @@ if not forecast_df.empty:
     if not shortage_hours.empty:
         st.error(f"⚠️ **SHORTAGE ALERT:** {len(shortage_hours)} hours are predicted to exceed the {demand_threshold} MW capacity limit.")
     else:
-        st.success("✅ Forecast is currently below the supply capacity limit."
+        st.success("✅ Forecast is currently below the supply capacity limit.")
 
 
 # --- 5. DRIVER ANALYSIS PLOT ---
