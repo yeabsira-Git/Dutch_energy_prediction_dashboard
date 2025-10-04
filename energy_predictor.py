@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore") # Suppress minor warnings
 MODEL_PATH = 'lgbm_model.pkl'
 DATA_PATH = 'merge_data_for_app.csv' # <-- FIXED: Corrected name (singular 'merge')
 TARGET_COL = 'Demand_MW'
-TEMP_COL = 'Temperature_0_1_degrees_Celsius' # Using sanitized name for consistency
+TEMP_COL = 'Temperature (0.1 degrees Celsius)' # Using sanitized name for consistency
 
 # The exact 50 features used for training (ORDER MATTERS!)
 # The list is based on your final debug output.
