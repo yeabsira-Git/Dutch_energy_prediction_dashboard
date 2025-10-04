@@ -1,4 +1,4 @@
-# app.py: Streamlit Dashboard Frontend
+# app.py: Streamlit Dashboard Frontend.
 
 import streamlit as st
 import plotly.express as px
