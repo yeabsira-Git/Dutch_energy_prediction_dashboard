@@ -91,8 +91,17 @@ def generate_forecast(df_historical, n_hours=72, temp_climatology_path='energy_h
     df_temp = df_historical[[TEMP_COL]].copy() 
     future_df = pd.DataFrame(index=future_index)
     
-    future_df[TEMP_COL] = df_temp.iloc[-24:][TEMP_COL].values[:n_hours] 
-    future_df[TARGET_COL] = np.nan
+# Ensure temperature data is available for the full forecast horizon (n_hours)
+    # 1. Get the last 24 hours of known temperature data
+    temp_24h = df_temp[TEMP_COL].tail(24).values
+    
+    # 2. Calculate how many times to repeat the 24-hour cycle to cover n_hours
+    reps = int(np.ceil(n_hours / 24))
+    
+    # 3. Tile (repeat) the 24-hour data and slice it to the exact length needed
+    tiled_temp = np.tile(temp_24h, reps)[:n_hours]
+
+    future_df[TEMP_COL] = tiled_temp # Assign the correctly sized array
     
     df_full_extended = pd.concat([df_historical, future_df], axis=0)
     df_full_extended = create_features(df_full_extended)
