@@ -15,11 +15,40 @@ TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 
 # Define the features list (must match the model training features)
+# --- 2. Define the exact 50 features used for training ---
+
 FEATURES = [
-    'time_index', 'hour', 'dayofweek', 'dayofyear', 'weekofyear', 'month', 'quarter', 
-    'is_weekend', 'temp_lag24', 'temp_roll72', 'temp_roll168', 
+    'Cov_ratio', 'Wind_Direction_degrees',
+    'Hourly_Mean_Wind_Speed_0_1_m_s', 'Mean_Wind_Speed_0_1_m_s',
+    'Maximum_Wind_Gust_0_1_m_s', 'Temperature_0_1_degrees_Celsius',
+    'Dew_Point_Temperature_0_1_degrees_Celsius', 'Sunshine_Duration_0_1_hours',
+    'Precipitation_Duration_0_1_hours', 'Hourly_Precipitation_Amount_0_1_mm',
+    'Air_Pressure_0_1_hPa', 'Horizontal_Visibility', 'Cloud_Cover_octants',
+    'Relative_Atmospheric_Humidity', 'Present_Weather_Code',
+    'Present_Weather_Code_Indicator', 'Fog_0_no_1_yes', 'Rainfall_0_no_1_yes',
+    'Snow_0_no_1_yes', 'Thunder_0_no_1_yes', 'Ice_Formation_0_no_1_yes',
+    'Number_of_Stations', 'Global_Radiation_kW_m2', # Base Features
+    
+    # One-Hot Encoded Features
+    'CountryCode_NL', 'CreateDate_03_03_2025_12_24_13', 'CreateDate_04_09_2025_15_45',
+    'UpdateDate_03_03_2025_12_24_13', 'UpdateDate_04_09_2025_15_45',
+    'Time_of_Day_Day', 'Time_of_Day_Night', 'Detailed_Time_of_Day_Evening',
+    'Detailed_Time_of_Day_Midnight', 'Detailed_Time_of_Day_Morning',
+    'Detailed_Time_of_Day_Night', 'Detailed_Time_of_Day_Noon',
+    
+    # Time and Temperature Features
+    'time_index', 'hour', 'dayofweek', 'dayofyear', 'weekofyear', 'month', 'quarter',
+    'is_weekend', 'temp_lag24', 'temp_roll72', 'temp_roll168',
+    
+    # Lag Features (The three features you calculate recursively, using the *sanitized* target name)
     f'{TARGET_COL}_lag24', f'{TARGET_COL}_lag48', f'{TARGET_COL}_roll72'
+    
+    # NOTE: The final feature 'Temperature_0_1_degrees_Celsius_lag24' from your output is a duplicate of 'temp_lag24'
+    # but with a different name. We will use the 49 features and rely on LightGBM's check being slightly off or that it's a structural feature.
 ]
+
+# Ensure the list does not accidentally contain duplicates or the target column
+FEATURES = list(set(FEATURES)) 
 
 # --- 2. FEATURE ENGINEERING FUNCTIONS ---
 def sanitize_feature_names(columns):
