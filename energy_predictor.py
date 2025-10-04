@@ -93,6 +93,9 @@ def create_features(df):
 
 # --- 3. DATA LOADING AND VISUALIZATION PREP ---
 # --- CRITICAL FIX: Encode Categorical Features ---
+# energy_predictor.py (around line 95)
+
+# --- 3. DATA LOADING AND VISUALIZATION PREP ---
 def load_and_preprocess_data():
     """Loads and prepares the historical data, including CRITICAL categorical encoding."""
     try:
@@ -105,7 +108,10 @@ def load_and_preprocess_data():
 
     # --- CRITICAL FIX: Encode Categorical Features ---
     df = encode_categoricals(df)
-    df.columns = sanitize_feature_names(df.columns)
+    
+    # --- CRITICAL FIX: Sanitize ALL column names before proceeding ---
+    df.columns = sanitize_feature_names(df.columns) 
+
     # Use the consistent, sanitized column name for the temperature column
     df['Temperature_C'] = df[TEMP_COL] / 10
     df['Hour'] = df.index.hour
