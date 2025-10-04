@@ -124,12 +124,25 @@ def generate_forecast(df_historical, n_hours=72, temp_climatology_path='energy_h
         roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
         X_current.loc[current_index, f'{TARGET_COL}_roll72'] = roll72_val
         
+       # energy_predictor.py
+
+# ... (around line 128)
+
         X_current_features = X_current[FEATURES].copy()
         
-        if not X_current_features[[f'{TARGET_COL}_lag24', f'{TARGET_COL}_lag48', f'{TARGET_COL}_roll72']].isnull().any(axis=1).all():
+        # --- ROBUST PREDICTION CHECK ---
+        # Ensure NONE of the lag features are NaN before predicting.
+        # The model requires the lag features for the first few predictions (e.g., first 72 hours).
+        required_lag_features = [f'{TARGET_COL}_lag24', f'{TARGET_COL}_lag48', f'{TARGET_COL}_roll72']
+        
+        if not X_current_features[required_lag_features].isnull().values.any():
+            # If all required features are available, make the prediction
             prediction = model.predict(X_current_features)[0]
             future_df.loc[current_index, PREDICTION_COL_NAME] = prediction
         else:
+            # If any required feature is missing (NaN), skip the prediction for this hour
             future_df.loc[current_index, PREDICTION_COL_NAME] = np.nan
+
+    # ... (rest of the function)
 
     return future_df[[PREDICTION_COL_NAME]].dropna()
