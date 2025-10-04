@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore") # Suppress minor warnings
 
 # --- 1. CONFIGURATION AND CONSTANTS ---
 MODEL_PATH = 'lgbm_model.pkl'
-DATA_PATH = 'merge_data_for_app.csv' # <--- FIXED: Now points to your actual data file name
+DATA_PATH = 'merged_data_for_app.csv' # <--- FIXED: Now points to your actual data file name
 TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature_0_1_degrees_Celsius'
 
