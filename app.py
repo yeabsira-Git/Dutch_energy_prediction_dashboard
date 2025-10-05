@@ -57,8 +57,6 @@ def create_features(df):
         df['temp_roll72'] = df[temp_col_sanitized].rolling(window=72, min_periods=1).mean().shift(1)
         df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)
     else:
-        # In the recursive loop, this will be handled by the alignment step
-        # For historical data, this shouldn't happen if the column is present
         pass 
 
     return df
@@ -110,6 +108,7 @@ def load_data(path):
         df_encoded = pd.get_dummies(df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
         
         # 2. DROP ORIGINAL TEXT COLUMNS AND KEEP ONLY NUMERIC + ENCODED
+        # Note: This is where we implicitly rely on pandas reading the weather data as numeric
         df_encoded = df_encoded.select_dtypes(exclude=['object', 'category'])
         
         # 3. CREATE TIME/LAG FEATURES
@@ -206,22 +205,19 @@ if historical_df is not None and model is not None:
             # --- Add Categorical Placeholders ---
             for col in CATEGORICAL_COLS:
                 if col == 'Time_of_Day':
-                    # Day: 6-17, Night: 18-5
                     future_exog_climatology_df[col] = np.where(future_exog_climatology_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
                 elif col == 'Detailed_Time_of_Day':
-                    # Corrected mapping to ensure 'Night' is created (the missing dummy in the error)
                     future_exog_climatology_df[col] = future_exog_climatology_df.index.hour.map(lambda h: 
                         'Morning' if h in range(5, 12) else 
                         'Noon' if h in range(12, 17) else 
                         'Evening' if h in range(17, 22) else 
                         'Night'
-                    ).fillna('Night') # Fallback ensures a category is always present.
+                    ).fillna('Night') 
                 elif col == 'MeasureItem':
                     future_exog_climatology_df[col] = 'Monthly Hourly Load Values'
                 elif col == 'CountryCode':
                     future_exog_climatology_df[col] = 'NL'
                 elif col in ['CreateDate', 'UpdateDate']:
-                    # Hardcode the constant that generates the most frequent dummy (the others will be 0)
                     future_exog_climatology_df[col] = '03-03-2025 12:24:13' 
 
             # 1e. One-hot encode the future data
@@ -240,14 +236,22 @@ if historical_df is not None and model is not None:
             idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')
             df_temp = df_combined.loc[idx_forecast].copy()
 
-            # CRITICAL FIX: Align feature set to the model's expected features
-            # This ensures all missing features (numerical and dummy) are created and initialized to 0.
+            # CRITICAL FIX 1: Align feature set to the model's expected features
             future_df = pd.DataFrame(0, index=df_temp.index, columns=EXPECTED_FEATURES)
 
             for col in df_temp.columns:
                 if col in future_df.columns:
                     future_df[col] = df_temp[col]
 
+            # CRITICAL FIX 2: Ensure all EXPECTED_FEATURES are explicitly converted to float
+            # This solves the 'object' dtype error for the model input
+            for col in EXPECTED_FEATURES:
+                if col in future_df.columns:
+                    # pd.to_numeric coerces non-numeric values (like 'object' type) to numeric.
+                    # 'coerce' turns any non-convertible value (like NaT in date-based columns) into NaN, 
+                    # and then we cast the whole thing to float.
+                    future_df[col] = pd.to_numeric(future_df[col], errors='coerce').astype(float)
+            
             # Add target lag columns back, they are not part of the model's base features
             future_df[f'{TARGET_COL_SANITIZED}_lag24'] = np.nan
             future_df[f'{TARGET_COL_SANITIZED}_lag48'] = np.nan
@@ -284,7 +288,7 @@ if historical_df is not None and model is not None:
                 # ------------------------------
 
                 # 3. Predict the current time step
-                # We only select the features the model expects, which are guaranteed to exist now
+                # We select the features the model expects, which are guaranteed to exist and be float now
                 X_current_features = X_current[EXPECTED_FEATURES].copy()
 
                 # CRITICAL CHECK: Only predict after the first 72 hours (when target lags are available)
