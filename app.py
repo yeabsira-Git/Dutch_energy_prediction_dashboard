@@ -194,6 +194,23 @@ if historical_df is not None and model is not None:
             # Ensure future temperature data is correctly included for feature creation
             future_df = future_df.loc[:, ~future_df.columns.duplicated()].copy()
             future_df = create_features(future_df.copy())
+            # Select only the needed future index
+            idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')
+            future_df = df_combined.loc[idx_forecast].copy()
+
+            # Ensure future temperature data is correctly included for feature creation
+            future_df = future_df.loc[:, ~future_df.columns.duplicated()].copy()
+            future_df = create_features(future_df.copy())
+
+            # --- CRITICAL FIX: Initialize Target Lag Columns ---
+            TARGET_COL_SANITIZED = sanitize_feature_names([TARGET_COL])[0]
+            future_df[f'{TARGET_COL_SANITIZED}_lag24'] = np.nan
+            future_df[f'{TARGET_COL_SANITIZED}_lag48'] = np.nan
+            future_df[f'{TARGET_COL_SANITIZED}_roll72'] = np.nan
+            # ---------------------------------------------------
+
+            # --- Recursive Prediction Loop (Simplified for Streamlit) ---
+            # ... rest of the code follows ...
 
             # --- Recursive Prediction Loop (Simplified for Streamlit) ---
 
