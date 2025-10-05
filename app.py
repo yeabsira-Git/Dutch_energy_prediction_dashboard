@@ -31,6 +31,7 @@ def sanitize_feature_names(columns):
 
 # Feature Engineering Function
 def create_features(df):
+    df.columns = sanitize_feature_names(df.columns)
     df.index = pd.to_datetime(df.index)
     df['time_index'] = np.arange(len(df.index))
     df['hour'] = df.index.hour
@@ -50,7 +51,7 @@ def create_features(df):
     df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)
 
     # Sanitization for consistent column names
-    df.columns = sanitize_feature_names(df.columns)
+    #df.columns = sanitize_feature_names(df.columns)
 
     return df
 
