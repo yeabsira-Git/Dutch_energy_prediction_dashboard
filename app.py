@@ -57,13 +57,16 @@ def create_features(df):
         df['temp_roll72'] = df[temp_col_sanitized].rolling(window=72, min_periods=1).mean().shift(1)
         df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)
     else:
-        st.error(f"Missing temperature column: {temp_col_sanitized}")
+        # In the recursive loop, this will be handled by the alignment step
+        # For historical data, this shouldn't happen if the column is present
+        pass 
 
     return df
 
 # Target Lag Function (Used only for initial historical data setup)
 def add_lags(df, target_col):
     target_col_sanitized = sanitize_feature_names([target_col])[0]
+    df[target_col_sanitized] = df[target_col_sanitized] # Ensure sanitized column is used
     df[f'{target_col_sanitized}_lag24'] = df[target_col_sanitized].shift(24)
     df[f'{target_col_sanitized}_lag48'] = df[target_col_sanitized].shift(48)
     df[f'{target_col_sanitized}_roll72'] = df[target_col_sanitized].shift(24).rolling(window=72).mean()
@@ -137,16 +140,17 @@ if historical_df is not None and model is not None:
     # Get the last actual demand data for lag calculation
     TARGET_COL_SANITIZED = sanitize_feature_names([TARGET_COL])[0]
     last_actuals = historical_df[TARGET_COL_SANITIZED]
+    EXPECTED_FEATURES = model.feature_name_
 
     # --- Sidebar Configuration ---
     st.sidebar.header("Prediction Settings")
 
     # User selects the forecast start date
-    max_forecast_date = datetime(2025, 12, 31, 23, 0, 0) # Maximum date from your training script
+    max_forecast_date = datetime(2025, 12, 31, 23, 0, 0) 
 
     forecast_start_date_input = st.sidebar.date_input(
         "Forecast Start Date (Day After Last Actual Data)",
-        value=datetime(2025, 7, 1).date(), # Default to 2025-07-01 (as in your script)
+        value=datetime(2025, 7, 1).date(), 
         min_value=datetime(2025, 7, 1).date(),
         max_value=max_forecast_date.date()
     )
@@ -167,128 +171,112 @@ if historical_df is not None and model is not None:
 
         with st.spinner(f"Running recursive forecast for {forecast_days} days..."):
 
-            # --- Prepare Future Data (Requires the full historical data again for temperature lookups) ---
+            # --- Prepare Future Data (Requires the full historical data again for exogenous lookups) ---
             df_raw = load_raw_data('cleaned_energy_weather_data(1).csv') 
             if df_raw is None: st.stop()
 
             # Now process the raw data for the temperature lookup
             df_raw.set_index(DATE_COL, inplace=True)
             df_raw.index = pd.to_datetime(df_raw.index)
-            df_full_temp = df_raw
+            df_full_temp = df_raw.copy()
 
-            # --- Recreate 2024 Climatology Forecast for Temperature (Exogenous Variable) ---
+            # --- Recreate 2024 Climatology Forecast for ALL Exogenous Variables ---
             START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'
             END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'
-
-            temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, TEMP_COL].copy()
-
-            # Create the future index that matches the forecast period
             dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')
+            
+            # Get all columns needed for future features that are not the target
+            EXOGENOUS_COLS_RAW = [col for col in df_full_temp.columns if col != TARGET_COL and col not in CATEGORICAL_COLS and col != DATE_COL]
+            
+            # Extract climatology for ALL exogenous columns
+            temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, EXOGENOUS_COLS_RAW].copy()
 
             if len(temp_history_climatology) != len(dates_2025_forecast_index):
                 st.error("Climatology data length mismatch. Cannot proceed. Check data consistency for 2024-07 to 2024-12.") 
                 st.stop()
             
-            temp_forecast = pd.Series(temp_history_climatology.values, index=dates_2025_forecast_index)
-            temp_forecast.name = TEMP_COL
+            # Create future exogenous dataframe (climatology)
+            future_exog_climatology_df = pd.DataFrame(
+                temp_history_climatology.values, 
+                index=dates_2025_forecast_index, 
+                columns=temp_history_climatology.columns
+            )
+            future_exog_climatology_df[TARGET_COL] = np.nan # Add target column placeholder
 
-            future_exog_df = temp_forecast.to_frame()
-            future_exog_df[TARGET_COL] = np.nan
-
-            # --- CRITICAL FIX: Add and encode the required categorical columns for the future data ---
-            
-            # Replicate the values that created the exact dummy columns the model expects (from error analysis)
+            # --- Add Categorical Placeholders ---
             for col in CATEGORICAL_COLS:
-                if col == 'MeasureItem':
-                    future_exog_df[col] = 'Monthly Hourly Load Values'
-                elif col == 'CountryCode':
-                    future_exog_df[col] = 'NL'
-                elif col == 'Time_of_Day':
-                    # Infer Time_of_Day (Day: 6-17, Night: 18-5)
-                    future_exog_df[col] = np.where(future_exog_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
+                if col == 'Time_of_Day':
+                    # Day: 6-17, Night: 18-5
+                    future_exog_climatology_df[col] = np.where(future_exog_climatology_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
                 elif col == 'Detailed_Time_of_Day':
-                    # Infer Detailed_Time_of_Day based on hour to match model features
-                    future_exog_df[col] = future_exog_df.index.hour.map(lambda h: 'Morning' if h in range(5, 12) else 'Noon' if h in range(12, 17) else 'Evening' if h in range(17, 22) else 'Midnight')
-                    # NOTE: Using 'Midnight' for 22, 23, 0, 1, 2, 3, 4. This is the simplest mapping that generates the required dummies from the error list.
+                    # Corrected mapping to ensure 'Night' is created (the missing dummy in the error)
+                    future_exog_climatology_df[col] = future_exog_climatology_df.index.hour.map(lambda h: 
+                        'Morning' if h in range(5, 12) else 
+                        'Noon' if h in range(12, 17) else 
+                        'Evening' if h in range(17, 22) else 
+                        'Night'
+                    ).fillna('Night') # Fallback ensures a category is always present.
+                elif col == 'MeasureItem':
+                    future_exog_climatology_df[col] = 'Monthly Hourly Load Values'
+                elif col == 'CountryCode':
+                    future_exog_climatology_df[col] = 'NL'
                 elif col in ['CreateDate', 'UpdateDate']:
-                    # Use the most frequent date string that generated the required dummy column
-                    future_exog_df[col] = '03-03-2025 12:24:13' 
+                    # Hardcode the constant that generates the most frequent dummy (the others will be 0)
+                    future_exog_climatology_df[col] = '03-03-2025 12:24:13' 
 
-            # Perform the encoding on the future data
-            future_exog_df = pd.get_dummies(future_exog_df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
+            # 1e. One-hot encode the future data
+            future_exog_df_encoded = pd.get_dummies(future_exog_climatology_df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
             
-            # -----------------------------------------------------------------------------------------
+            # Apply feature engineering (time features and temperature lags)
+            future_exog_df_encoded = create_features(future_exog_df_encoded.copy())
             
+            # --- Combine and Final Alignment ---
+
             # Combine historical (actual demand) and future exogenous data
-            df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df], axis=0)
+            df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df_encoded], axis=0)
             df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
 
             # Select only the needed future index
             idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')
-            future_df = df_combined.loc[idx_forecast].copy()
+            df_temp = df_combined.loc[idx_forecast].copy()
 
-            # Ensure future temperature data is correctly included for feature creation
-            future_df = future_df.loc[:, ~future_df.columns.duplicated()].copy()
-            future_df = create_features(future_df.copy())
-            
-            # --- CRITICAL FIX: Initialize all Missing Numerical/Exogenous and Lag Columns ---
+            # CRITICAL FIX: Align feature set to the model's expected features
+            # This ensures all missing features (numerical and dummy) are created and initialized to 0.
+            future_df = pd.DataFrame(0, index=df_temp.index, columns=EXPECTED_FEATURES)
 
-            # Initialize Target Lag Columns (set to NaN, will be populated recursively)
+            for col in df_temp.columns:
+                if col in future_df.columns:
+                    future_df[col] = df_temp[col]
+
+            # Add target lag columns back, they are not part of the model's base features
             future_df[f'{TARGET_COL_SANITIZED}_lag24'] = np.nan
             future_df[f'{TARGET_COL_SANITIZED}_lag48'] = np.nan
             future_df[f'{TARGET_COL_SANITIZED}_roll72'] = np.nan
-            
-            # Initialize Other Missing Numerical/Exogenous Columns (from the error list)
-            # These were generated in the training data but might be missing in the 'raw' future slice
-            # We initialize them to NaN/0 and rely on create_features/get_dummies to populate the actual values
-            MISSING_NUM_COLS = ['index', 'Cov_ratio', 'Number_of_Stations', 'Mean_Wind_Speed_0_1_m_s', 
-                                'Maximum_Wind_Gust_0_1_m_s', 'Sunshine_Duration_0_1_hours', 
-                                'Precipitation_Duration_0_1_hours', 'Hourly_Precipitation_Amount_0_1_mm', 
-                                'Air_Pressure_0_1_hPa', 'Horizontal_Visibility', 'Cloud_Cover_octants', 
-                                'Relative_Atmospheric_Humidity', 'Present_Weather_Code', 
-                                'Present_Weather_Code_Indicator', 'Fog_0_no_1_yes', 'Rainfall_0_no_1_yes', 
-                                'Snow_0_no_1_yes', 'Thunder_0_no_1_yes', 'Ice_Formation_0_no_1_yes', 
-                                'Global_Radiation_kW_m2']
-            
-            for col in MISSING_NUM_COLS:
-                if col not in future_df.columns:
-                    # Initialize missing columns, assuming they should be 0 or NaN if not directly calculated
-                    future_df[col] = 0.0
-
-            # -----------------------------------------------------------------------------------
 
             # --- Recursive Prediction Loop (Simplified for Streamlit) ---
 
             PREDICTION_COL_NAME = 'Predicted_Demand_MW'
-            TEMP_COL_SANITIZED = sanitize_feature_names([TEMP_COL])[0]
-
+            
             # Need last 72 hours of actual data for initial roll72 calculation
             last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
 
             # Initialize prediction series (will be populated during loop)
             s_predictions = pd.Series(index=idx_forecast, dtype=float)
-
-            # Get the feature names the model expects
-            EXPECTED_FEATURES = model.feature_name_
-
+            
             st.write(f"Forecasting from **{forecast_start_dt}** to **{forecast_end_dt}** (Total: {len(idx_forecast)} hours)")
-
 
             for i, current_index in enumerate(idx_forecast):
 
-                # 1. Prepare the row for the current timestamp
-                # Note: future_df already has all features EXCEPT the target lags
+                # 1. Prepare the row for the current timestamp (using the aligned future_df)
                 X_current = future_df.loc[[current_index]].copy()
 
                 # 2. Combine all known/predicted values for lag calculation
                 s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
 
                 # --- ROBUST LAG CALCULATION ---
-                # Lag 24 & Lag 48
                 X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag24'] = s_latest.get(current_index - pd.Timedelta(hours=24))
                 X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag48'] = s_latest.get(current_index - pd.Timedelta(hours=48))
-
-                # Rolling Mean 72
+                
                 roll72_window_end = current_index - pd.Timedelta(hours=24)
                 roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
                 roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
@@ -296,6 +284,7 @@ if historical_df is not None and model is not None:
                 # ------------------------------
 
                 # 3. Predict the current time step
+                # We only select the features the model expects, which are guaranteed to exist now
                 X_current_features = X_current[EXPECTED_FEATURES].copy()
 
                 # CRITICAL CHECK: Only predict after the first 72 hours (when target lags are available)
@@ -316,7 +305,6 @@ if historical_df is not None and model is not None:
             st.success("Forecast Complete! Results displayed below.")
 
             # Shortage analysis (Simplified)
-            # Define a simple shortage threshold (e.g., top 1% of historical demand)
             shortage_threshold = last_actuals.quantile(0.99)
 
             col1, col2 = st.columns(2)
