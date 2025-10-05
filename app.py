@@ -1,1 +1,270 @@
-{"nbformat":4,"nbformat_minor":0,"metadata":{"colab":{"provenance":[],"authorship_tag":"ABX9TyNoVMWu4XM9THiFN5V1xNER"},"kernelspec":{"name":"python3","display_name":"Python 3"},"language_info":{"name":"python"}},"cells":[{"cell_type":"code","source":["from google.colab import drive\n","drive.mount('/content/drive')"],"metadata":{"colab":{"base_uri":"https://localhost:8080/"},"id":"jZtVh7L3e3Do","executionInfo":{"status":"ok","timestamp":1759686436555,"user_tz":-120,"elapsed":27553,"user":{"displayName":"Yeabsira Belete","userId":"00543398888214867074"}},"outputId":"f846759a-0262-4063-bccb-a001121ad674"},"execution_count":4,"outputs":[{"output_type":"stream","name":"stdout","text":["Mounted at /content/drive\n"]}]},{"cell_type":"code","source":["!pip install streamlit joblib lightgbm scikit-learn"],"metadata":{"colab":{"base_uri":"https://localhost:8080/"},"id":"26Huiae6bpZB","executionInfo":{"status":"ok","timestamp":1759685575870,"user_tz":-120,"elapsed":11025,"user":{"displayName":"Yeabsira Belete","userId":"00543398888214867074"}},"outputId":"201e6d1a-7e8e-41c4-8a0d-1274228a9e73"},"execution_count":2,"outputs":[{"output_type":"stream","name":"stdout","text":["Collecting streamlit\n","  Downloading streamlit-1.50.0-py3-none-any.whl.metadata (9.5 kB)\n","Requirement already satisfied: joblib in /usr/local/lib/python3.12/dist-packages (1.5.2)\n","Requirement already satisfied: lightgbm in /usr/local/lib/python3.12/dist-packages (4.6.0)\n","Requirement already satisfied: scikit-learn in /usr/local/lib/python3.12/dist-packages (1.6.1)\n","Requirement already satisfied: altair!=5.4.0,!=5.4.1,<6,>=4.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (5.5.0)\n","Requirement already satisfied: blinker<2,>=1.5.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (1.9.0)\n","Requirement already satisfied: cachetools<7,>=4.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (5.5.2)\n","Requirement already satisfied: click<9,>=7.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (8.3.0)\n","Requirement already satisfied: numpy<3,>=1.23 in /usr/local/lib/python3.12/dist-packages (from streamlit) (2.0.2)\n","Requirement already satisfied: packaging<26,>=20 in /usr/local/lib/python3.12/dist-packages (from streamlit) (25.0)\n","Requirement already satisfied: pandas<3,>=1.4.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (2.2.2)\n","Requirement already satisfied: pillow<12,>=7.1.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (11.3.0)\n","Requirement already satisfied: protobuf<7,>=3.20 in /usr/local/lib/python3.12/dist-packages (from streamlit) (5.29.5)\n","Requirement already satisfied: pyarrow>=7.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (18.1.0)\n","Requirement already satisfied: requests<3,>=2.27 in /usr/local/lib/python3.12/dist-packages (from streamlit) (2.32.4)\n","Requirement already satisfied: tenacity<10,>=8.1.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (8.5.0)\n","Requirement already satisfied: toml<2,>=0.10.1 in /usr/local/lib/python3.12/dist-packages (from streamlit) (0.10.2)\n","Requirement already satisfied: typing-extensions<5,>=4.4.0 in /usr/local/lib/python3.12/dist-packages (from streamlit) (4.15.0)\n","Requirement already satisfied: watchdog<7,>=2.1.5 in /usr/local/lib/python3.12/dist-packages (from streamlit) (6.0.0)\n","Requirement already satisfied: gitpython!=3.1.19,<4,>=3.0.7 in /usr/local/lib/python3.12/dist-packages (from streamlit) (3.1.45)\n","Collecting pydeck<1,>=0.8.0b4 (from streamlit)\n","  Downloading pydeck-0.9.1-py2.py3-none-any.whl.metadata (4.1 kB)\n","Requirement already satisfied: tornado!=6.5.0,<7,>=6.0.3 in /usr/local/lib/python3.12/dist-packages (from streamlit) (6.4.2)\n","Requirement already satisfied: scipy in /usr/local/lib/python3.12/dist-packages (from lightgbm) (1.16.2)\n","Requirement already satisfied: threadpoolctl>=3.1.0 in /usr/local/lib/python3.12/dist-packages (from scikit-learn) (3.6.0)\n","Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (3.1.6)\n","Requirement already satisfied: jsonschema>=3.0 in /usr/local/lib/python3.12/dist-packages (from altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (4.25.1)\n","Requirement already satisfied: narwhals>=1.14.2 in /usr/local/lib/python3.12/dist-packages (from altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (2.6.0)\n","Requirement already satisfied: gitdb<5,>=4.0.1 in /usr/local/lib/python3.12/dist-packages (from gitpython!=3.1.19,<4,>=3.0.7->streamlit) (4.0.12)\n","Requirement already satisfied: python-dateutil>=2.8.2 in /usr/local/lib/python3.12/dist-packages (from pandas<3,>=1.4.0->streamlit) (2.9.0.post0)\n","Requirement already satisfied: pytz>=2020.1 in /usr/local/lib/python3.12/dist-packages (from pandas<3,>=1.4.0->streamlit) (2025.2)\n","Requirement already satisfied: tzdata>=2022.7 in /usr/local/lib/python3.12/dist-packages (from pandas<3,>=1.4.0->streamlit) (2025.2)\n","Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests<3,>=2.27->streamlit) (3.4.3)\n","Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests<3,>=2.27->streamlit) (3.10)\n","Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests<3,>=2.27->streamlit) (2.5.0)\n","Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests<3,>=2.27->streamlit) (2025.8.3)\n","Requirement already satisfied: smmap<6,>=3.0.1 in /usr/local/lib/python3.12/dist-packages (from gitdb<5,>=4.0.1->gitpython!=3.1.19,<4,>=3.0.7->streamlit) (5.0.2)\n","Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (3.0.3)\n","Requirement already satisfied: attrs>=22.2.0 in /usr/local/lib/python3.12/dist-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (25.3.0)\n","Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /usr/local/lib/python3.12/dist-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (2025.9.1)\n","Requirement already satisfied: referencing>=0.28.4 in /usr/local/lib/python3.12/dist-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (0.36.2)\n","Requirement already satisfied: rpds-py>=0.7.1 in /usr/local/lib/python3.12/dist-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<6,>=4.0->streamlit) (0.27.1)\n","Requirement already satisfied: six>=1.5 in /usr/local/lib/python3.12/dist-packages (from python-dateutil>=2.8.2->pandas<3,>=1.4.0->streamlit) (1.17.0)\n","Downloading streamlit-1.50.0-py3-none-any.whl (10.1 MB)\n","\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m10.1/10.1 MB\u001b[0m \u001b[31m42.8 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\n","\u001b[?25hDownloading pydeck-0.9.1-py2.py3-none-any.whl (6.9 MB)\n","\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m6.9/6.9 MB\u001b[0m \u001b[31m95.5 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\n","\u001b[?25hInstalling collected packages: pydeck, streamlit\n","Successfully installed pydeck-0.9.1 streamlit-1.50.0\n"]}]},{"cell_type":"code","execution_count":5,"metadata":{"colab":{"base_uri":"https://localhost:8080/"},"id":"kCz2VpsdbfWi","executionInfo":{"status":"ok","timestamp":1759686476121,"user_tz":-120,"elapsed":63,"user":{"displayName":"Yeabsira Belete","userId":"00543398888214867074"}},"outputId":"df89fed3-d6d5-41f3-9e9d-7c1427fd9d22"},"outputs":[{"output_type":"stream","name":"stderr","text":["2025-10-05 17:47:55.966 No runtime found, using MemoryCacheStorageManager\n","2025-10-05 17:47:55.968 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.970 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.971 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.972 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.973 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.974 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n","2025-10-05 17:47:55.975 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.\n"]}],"source":["import streamlit as st\n","import pandas as pd\n","import numpy as np\n","import joblib\n","import re\n","from datetime import datetime\n","import lightgbm as lgb\n","from sklearn.metrics import mean_squared_error\n","import warnings\n","warnings.filterwarnings(\"ignore\")\n","\n","# --- CONFIGURATION (Must match training script) ---\n","DATE_COL = 'DateUTC'\n","TARGET_COL = 'Demand_MW'\n","TEMP_COL = 'Temperature (0.1 degrees Celsius)'\n","MODEL_FILENAME = 'lightgbm_demand_model.joblib'\n","\n","\n","# --- 1. UTILITY FUNCTIONS (Copied from Training Script) ---\n","\n","# Helper function to sanitize names\n","def sanitize_feature_names(columns):\n","    new_cols = []\n","    for col in columns:\n","        col = str(col)\n","        col = re.sub(r'[^A-Za-z0-9_]+', '_', col)\n","        col = re.sub(r'^_+|_+$', '', col)\n","        col = re.sub(r'_{2,}', '_', col)\n","        new_cols.append(col)\n","    return new_cols\n","\n","# Feature Engineering Function\n","def create_features(df):\n","    df.index = pd.to_datetime(df.index)\n","    df['time_index'] = np.arange(len(df.index))\n","    df['hour'] = df.index.hour\n","    df['dayofweek'] = df.index.dayofweek\n","    df['dayofyear'] = df.index.dayofyear\n","    df['weekofyear'] = df.index.isocalendar().week.astype(int)\n","    df['month'] = df.index.month\n","    df['quarter'] = df.index.quarter\n","    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)\n","\n","    # Convert temperature to the sanitized name expected by the model\n","    temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]\n","\n","    # ADDED ROBUST TEMPERATURE FEATURES\n","    df['temp_lag24'] = df[temp_col_sanitized].shift(24)\n","    df['temp_roll72'] = df[temp_col_sanitized].rolling(window=72, min_periods=1).mean().shift(1)\n","    df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)\n","\n","    # Sanitization for consistent column names\n","    df.columns = sanitize_feature_names(df.columns)\n","\n","    return df\n","\n","# Target Lag Function\n","def add_lags(df, target_col):\n","    df[f'{target_col}_lag24'] = df[target_col].shift(24)\n","    df[f'{target_col}_lag48'] = df[target_col].shift(48)\n","    df[f'{target_col}_roll72'] = df[target_col].shift(24).rolling(window=72).mean()\n","    return df\n","\n","# --- 2. CACHING AND LOADING ---\n","\n","@st.cache_resource\n","def load_model():\n","    \"\"\"Load the trained LightGBM model from file.\"\"\"\n","    try:\n","        model = joblib.load(MODEL_FILENAME)\n","        st.success(\"✅ Model loaded successfully!\")\n","        return model\n","    except FileNotFoundError:\n","        st.error(f\"Error: Model file '{MODEL_FILENAME}' not found. Please ensure it is in the same directory.\")\n","        return None\n","\n","@st.cache_data\n","def load_data(path):\n","    \"\"\"Load and preprocess the historical data.\"\"\"\n","    try:\n","        df = pd.read_csv(path)\n","        df.set_index(DATE_COL, inplace=True)\n","        df.index = pd.to_datetime(df.index)\n","\n","        # --- Preprocessing steps from training script ---\n","        df = df[df.index <= '2025-06-30 23:00:00'].copy() # Only use historical actuals\n","\n","        # Simple One-Hot Encoding/Categorical cleanup (to match the model's feature space)\n","        df_encoded = df.select_dtypes(exclude=['object', 'category'])\n","\n","        df_historical_features = create_features(df_encoded.copy())\n","        df_historical_features = add_lags(df_historical_features, TARGET_COL).dropna()\n","\n","        return df_historical_features\n","    except Exception as e:\n","        st.error(f\"Error loading or preprocessing data: {e}\")\n","        return None\n","\n","# --- 3. STREAMLIT APP CORE ---\n","\n","st.set_page_config(\n","    page_title=\"Dutch Energy Demand Forecast\",\n","    layout=\"wide\",\n","    initial_sidebar_state=\"expanded\"\n",")\n","\n","st.title(\"💡 Early Energy Shortage Prediction Dashboard\")\n","st.markdown(\"Forecasting hourly energy demand in Dutch neighborhoods using LightGBM.\")\n","\n","# --- Load Data and Model ---\n","historical_df = load_data('cleaned_energy_weather_data (1).csv')\n","model = load_model()\n","\n","if historical_df is not None and model is not None:\n","    # Get the last actual demand data for lag calculation\n","    last_actuals = historical_df[sanitize_feature_names([TARGET_COL])[0]]\n","\n","    # --- Sidebar Configuration ---\n","    st.sidebar.header(\"Prediction Settings\")\n","\n","    # User selects the forecast start date\n","    max_forecast_date = datetime(2025, 12, 31, 23, 0, 0) # Maximum date from your training script\n","\n","    forecast_start_date_input = st.sidebar.date_input(\n","        \"Forecast Start Date (Day After Last Actual Data)\",\n","        value=datetime(2025, 7, 1).date(), # Default to 2025-07-01 (as in your script)\n","        min_value=datetime(2025, 7, 1).date(),\n","        max_value=max_forecast_date.date()\n","    )\n","\n","    # Convert date input to the required datetime object for indexing\n","    forecast_start_dt = pd.to_datetime(forecast_start_date_input).floor('D')\n","\n","    # User selects the forecast horizon\n","    forecast_days = st.sidebar.slider(\"Forecast Horizon (Days)\", min_value=1, max_value=60, value=7)\n","\n","    # Calculate the full forecast end date (hourly data)\n","    forecast_end_dt = forecast_start_dt + pd.Timedelta(days=forecast_days) - pd.Timedelta(hours=1)\n","\n","    st.sidebar.markdown(\"---\")\n","\n","    # --- Prediction Button ---\n","    if st.sidebar.button(\"Run Forecast\", type=\"primary\"):\n","\n","        with st.spinner(f\"Running recursive forecast for {forecast_days} days...\"):\n","\n","            # --- Prepare Future Data (Requires the full historical data again for temperature lookups) ---\n","            df_full_temp = load_data('cleaned_energy_weather_data (1).csv', path_only=True) # Full historical data\n","            df_full_temp.set_index(DATE_COL, inplace=True)\n","            df_full_temp.index = pd.to_datetime(df_full_temp.index)\n","\n","            # --- Recreate 2024 Climatology Forecast for Temperature (Exogenous Variable) ---\n","            START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'\n","            END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'\n","\n","            temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, TEMP_COL].copy()\n","\n","            # Create the future index that matches the forecast period\n","            dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')\n","\n","            if len(temp_history_climatology) != len(dates_2025_forecast_index):\n","                st.error(\"Climatology data length mismatch. Cannot proceed.\")\n","                st.stop()\n","\n","            temp_forecast = pd.Series(temp_history_climatology.values, index=dates_2025_forecast_index)\n","            temp_forecast.name = TEMP_COL\n","\n","            future_exog_df = temp_forecast.to_frame()\n","            future_exog_df[TARGET_COL] = np.nan\n","\n","            # Combine historical and future exog data\n","            df_combined = pd.concat([historical_df[[sanitize_feature_names([TARGET_COL])[0]]], future_exog_df], axis=0)\n","            df_combined = df_combined[~df_combined.index.duplicated(keep='first')]\n","\n","            # Select only the needed future index\n","            idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')\n","            future_df = df_combined.loc[idx_forecast].copy()\n","\n","            # Ensure future temperature data is correctly included for feature creation\n","            future_df = future_df.loc[:, ~future_df.columns.duplicated()].copy()\n","            future_df = create_features(future_df.copy())\n","\n","            # --- Recursive Prediction Loop (Simplified for Streamlit) ---\n","\n","            PREDICTION_COL_NAME = 'Predicted_Demand_MW'\n","            TARGET_COL_SANITIZED = sanitize_feature_names([TARGET_COL])[0]\n","            TEMP_COL_SANITIZED = sanitize_feature_names([TEMP_COL])[0]\n","\n","\n","            # Need last 72 hours for initial roll72 calculation\n","            last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()\n","\n","            # Initialize prediction series (will be populated during loop)\n","            s_predictions = pd.Series(index=idx_forecast, dtype=float)\n","\n","            # Get the feature names the model expects\n","            EXPECTED_FEATURES = model.feature_name_\n","\n","            st.write(f\"Forecasting from **{forecast_start_dt}** to **{forecast_end_dt}** (Total: {len(idx_forecast)} hours)\")\n","\n","\n","            for i, current_index in enumerate(idx_forecast):\n","\n","                # 1. Prepare the row for the current timestamp\n","                X_current = future_df.loc[[current_index]].copy()\n","\n","                # 2. Combine all known/predicted values for lag calculation\n","                s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()\n","\n","                # --- ROBUST LAG CALCULATION ---\n","                # Lag 24 & Lag 48\n","                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag24'] = s_latest.get(current_index - pd.Timedelta(hours=24))\n","                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag48'] = s_latest.get(current_index - pd.Timedelta(hours=48))\n","\n","                # Rolling Mean 72\n","                roll72_window_end = current_index - pd.Timedelta(hours=24)\n","                roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)\n","                roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()\n","                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_roll72'] = roll72_val\n","                # ------------------------------\n","\n","                # 3. Predict the current time step\n","                X_current_features = X_current[EXPECTED_FEATURES].copy()\n","\n","                # CRITICAL CHECK: Only predict after the first 72 hours (when target lags are available)\n","                if i >= 72:\n","                    prediction = model.predict(X_current_features)[0]\n","                else:\n","                    prediction = np.nan\n","\n","                # 4. Assign the prediction back into the series for the next step\n","                s_predictions.loc[current_index] = prediction\n","\n","\n","            # --- Display Results ---\n","            future_df[PREDICTION_COL_NAME] = s_predictions\n","            future_df = future_df.dropna(subset=[PREDICTION_COL_NAME]) # Drop the first 72 hours of NaN predictions\n","\n","            st.success(\"Forecast Complete! Results displayed below.\")\n","\n","            # Create a combined data frame for plotting and display\n","            df_plot = future_df[[PREDICTION_COL_NAME]].copy()\n","\n","            # Shortage analysis (Simplified)\n","            # Define a simple shortage threshold (e.g., top 1% of historical demand)\n","            shortage_threshold = last_actuals.quantile(0.99)\n","\n","            st.metric(label=\"Peak Predicted Demand\", value=f\"{df_plot[PREDICTION_COL_NAME].max():.2f} MW\")\n","            st.metric(label=\"Shortage Threshold (99th Percentile)\", value=f\"{shortage_threshold:.2f} MW\")\n","\n","            shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]\n","\n","            if not shortage_hours.empty:\n","                st.warning(f\"🚨 **SHORTAGE ALERT:** Predicted demand exceeds the 99th percentile threshold during **{len(shortage_hours)} hours** in the forecast period.\")\n","                st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)\n","            else:\n","                st.info(\"No extreme shortage events predicted above the 99th percentile threshold.\")\n","\n","\n","            # Plotting the forecast\n","            st.subheader(\"Hourly Demand Forecast\")\n","            st.line_chart(df_plot, y=PREDICTION_COL_NAME)\n","\n","            st.subheader(\"Raw Data Preview\")\n","            st.dataframe(df_plot, use_container_width=True)"]}]}
+import streamlit as st
+import pandas as pd
+import numpy as np
+import joblib
+import re
+from datetime import datetime
+import lightgbm as lgb
+from sklearn.metrics import mean_squared_error
+import warnings
+warnings.filterwarnings("ignore")
+
+# --- CONFIGURATION (Must match training script) ---
+DATE_COL = 'DateUTC'
+TARGET_COL = 'Demand_MW'
+TEMP_COL = 'Temperature (0.1 degrees Celsius)'
+MODEL_FILENAME = 'lightgbm_demand_model.joblib'
+
+
+# --- 1. UTILITY FUNCTIONS (Copied from Training Script) ---
+
+# Helper function to sanitize names
+def sanitize_feature_names(columns):
+    new_cols = []
+    for col in columns:
+        col = str(col)
+        col = re.sub(r'[^A-Za-z0-9_]+', '_', col)
+        col = re.sub(r'^_+|_+$', '', col)
+        col = re.sub(r'_{2,}', '_', col)
+        new_cols.append(col)
+    return new_cols
+
+# Feature Engineering Function
+def create_features(df):
+    df.index = pd.to_datetime(df.index)
+    df['time_index'] = np.arange(len(df.index))
+    df['hour'] = df.index.hour
+    df['dayofweek'] = df.index.dayofweek
+    df['dayofyear'] = df.index.dayofyear
+    df['weekofyear'] = df.index.isocalendar().week.astype(int)
+    df['month'] = df.index.month
+    df['quarter'] = df.index.quarter
+    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
+
+    # Convert temperature to the sanitized name expected by the model
+    temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
+
+    # ADDED ROBUST TEMPERATURE FEATURES
+    df['temp_lag24'] = df[temp_col_sanitized].shift(24)
+    df['temp_roll72'] = df[temp_col_sanitized].rolling(window=72, min_periods=1).mean().shift(1)
+    df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)
+
+    # Sanitization for consistent column names
+    df.columns = sanitize_feature_names(df.columns)
+
+    return df
+
+# Target Lag Function
+def add_lags(df, target_col):
+    df[f'{target_col}_lag24'] = df[target_col].shift(24)
+    df[f'{target_col}_lag48'] = df[target_col].shift(48)
+    df[f'{target_col}_roll72'] = df[target_col].shift(24).rolling(window=72).mean()
+    return df
+
+# --- 2. CACHING AND LOADING ---
+
+@st.cache_resource
+def load_model():
+    """Load the trained LightGBM model from file."""
+    try:
+        model = joblib.load(MODEL_FILENAME)
+        st.success("✅ Model loaded successfully!")
+        return model
+    except FileNotFoundError:
+        st.error(f"Error: Model file '{MODEL_FILENAME}' not found. Please ensure it is in the same directory.")
+        return None
+
+@st.cache_data
+def load_data(path):
+    """Load and preprocess the historical data."""
+    try:
+        df = pd.read_csv(path)
+        df.set_index(DATE_COL, inplace=True)
+        df.index = pd.to_datetime(df.index)
+
+        # --- Preprocessing steps from training script ---
+        df = df[df.index <= '2025-06-30 23:00:00'].copy() # Only use historical actuals
+
+        # Simple One-Hot Encoding/Categorical cleanup (to match the model's feature space)
+        df_encoded = df.select_dtypes(exclude=['object', 'category'])
+
+        df_historical_features = create_features(df_encoded.copy())
+        df_historical_features = add_lags(df_historical_features, TARGET_COL).dropna()
+
+        return df_historical_features
+    except Exception as e:
+        st.error(f"Error loading or preprocessing data: {e}")
+        return None
+
+# --- 3. STREAMLIT APP CORE ---
+
+st.set_page_config(
+    page_title="Dutch Energy Demand Forecast",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("💡 Early Energy Shortage Prediction Dashboard")
+st.markdown("Forecasting hourly energy demand in Dutch neighborhoods using LightGBM.")
+
+# --- Load Data and Model ---
+# FIX 1: Corrected filename by removing the space
+historical_df = load_data('cleaned_energy_weather_data(1).csv')
+model = load_model()
+
+if historical_df is not None and model is not None:
+    # Get the last actual demand data for lag calculation
+    last_actuals = historical_df[sanitize_feature_names([TARGET_COL])[0]]
+
+    # --- Sidebar Configuration ---
+    st.sidebar.header("Prediction Settings")
+
+    # User selects the forecast start date
+    max_forecast_date = datetime(2025, 12, 31, 23, 0, 0) # Maximum date from your training script
+
+    forecast_start_date_input = st.sidebar.date_input(
+        "Forecast Start Date (Day After Last Actual Data)",
+        value=datetime(2025, 7, 1).date(), # Default to 2025-07-01 (as in your script)
+        min_value=datetime(2025, 7, 1).date(),
+        max_value=max_forecast_date.date()
+    )
+
+    # Convert date input to the required datetime object for indexing
+    forecast_start_dt = pd.to_datetime(forecast_start_date_input).floor('D')
+
+    # User selects the forecast horizon
+    forecast_days = st.sidebar.slider("Forecast Horizon (Days)", min_value=1, max_value=60, value=7)
+
+    # Calculate the full forecast end date (hourly data)
+    forecast_end_dt = forecast_start_dt + pd.Timedelta(days=forecast_days) - pd.Timedelta(hours=1)
+
+    st.sidebar.markdown("---")
+
+    # --- Prediction Button ---
+    if st.sidebar.button("Run Forecast", type="primary"):
+
+        with st.spinner(f"Running recursive forecast for {forecast_days} days..."):
+
+            # --- Prepare Future Data (Requires the full historical data again for temperature lookups) ---
+            # FIX 2: Corrected function call by removing 'path_only=True' and space in filename
+            df_full_temp = load_data('cleaned_energy_weather_data(1).csv')
+            df_full_temp.set_index(DATE_COL, inplace=True)
+            df_full_temp.index = pd.to_datetime(df_full_temp.index)
+
+            # --- Recreate 2024 Climatology Forecast for Temperature (Exogenous Variable) ---
+            START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'
+            END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'
+
+            # Note: This block assumes 'df_full_temp' contains the 'Temperature (0.1 degrees Celsius)' column, 
+            # which is true based on your script's logic.
+
+            temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, TEMP_COL].copy()
+
+            # Create the future index that matches the forecast period
+            dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')
+
+            if len(temp_history_climatology) != len(dates_2025_forecast_index):
+                st.error("Climatology data length mismatch. Cannot proceed.")
+                st.stop()
+
+            temp_forecast = pd.Series(temp_history_climatology.values, index=dates_2025_forecast_index)
+            temp_forecast.name = TEMP_COL
+
+            future_exog_df = temp_forecast.to_frame()
+            future_exog_df[TARGET_COL] = np.nan
+
+            # Combine historical and future exog data
+            df_combined = pd.concat([historical_df[[sanitize_feature_names([TARGET_COL])[0]]], future_exog_df], axis=0)
+            df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
+
+            # Select only the needed future index
+            idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')
+            future_df = df_combined.loc[idx_forecast].copy()
+
+            # Ensure future temperature data is correctly included for feature creation
+            future_df = future_df.loc[:, ~future_df.columns.duplicated()].copy()
+            future_df = create_features(future_df.copy())
+
+            # --- Recursive Prediction Loop (Simplified for Streamlit) ---
+
+            PREDICTION_COL_NAME = 'Predicted_Demand_MW'
+            TARGET_COL_SANITIZED = sanitize_feature_names([TARGET_COL])[0]
+            TEMP_COL_SANITIZED = sanitize_feature_names([TEMP_COL])[0]
+
+
+            # Need last 72 hours for initial roll72 calculation
+            last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
+
+            # Initialize prediction series (will be populated during loop)
+            s_predictions = pd.Series(index=idx_forecast, dtype=float)
+
+            # Get the feature names the model expects
+            EXPECTED_FEATURES = model.feature_name_
+
+            st.write(f"Forecasting from **{forecast_start_dt}** to **{forecast_end_dt}** (Total: {len(idx_forecast)} hours)")
+
+
+            for i, current_index in enumerate(idx_forecast):
+
+                # 1. Prepare the row for the current timestamp
+                X_current = future_df.loc[[current_index]].copy()
+
+                # 2. Combine all known/predicted values for lag calculation
+                s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
+
+                # --- ROBUST LAG CALCULATION ---
+                # Lag 24 & Lag 48
+                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag24'] = s_latest.get(current_index - pd.Timedelta(hours=24))
+                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag48'] = s_latest.get(current_index - pd.Timedelta(hours=48))
+
+                # Rolling Mean 72
+                roll72_window_end = current_index - pd.Timedelta(hours=24)
+                roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
+                roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
+                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_roll72'] = roll72_val
+                # ------------------------------
+
+                # 3. Predict the current time step
+                X_current_features = X_current[EXPECTED_FEATURES].copy()
+
+                # CRITICAL CHECK: Only predict after the first 72 hours (when target lags are available)
+                if i >= 72:
+                    prediction = model.predict(X_current_features)[0]
+                else:
+                    prediction = np.nan
+
+                # 4. Assign the prediction back into the series for the next step
+                s_predictions.loc[current_index] = prediction
+
+
+            # --- Display Results ---
+            future_df[PREDICTION_COL_NAME] = s_predictions
+            future_df = future_df.dropna(subset=[PREDICTION_COL_NAME]) # Drop the first 72 hours of NaN predictions
+
+            st.success("Forecast Complete! Results displayed below.")
+
+            # Create a combined data frame for plotting and display
+            df_plot = future_df[[PREDICTION_COL_NAME]].copy()
+
+            # Shortage analysis (Simplified)
+            # Define a simple shortage threshold (e.g., top 1% of historical demand)
+            shortage_threshold = last_actuals.quantile(0.99)
+
+            st.metric(label="Peak Predicted Demand", value=f"{df_plot[PREDICTION_COL_NAME].max():.2f} MW")
+            st.metric(label="Shortage Threshold (99th Percentile)", value=f"{shortage_threshold:.2f} MW")
+
+            shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]
+
+            if not shortage_hours.empty:
+                st.warning(f"🚨 **SHORTAGE ALERT:** Predicted demand exceeds the 99th percentile threshold during **{len(shortage_hours)} hours** in the forecast period.")
+                st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)
+            else:
+                st.info("No extreme shortage events predicted above the 99th percentile threshold.")
+
+
+            # Plotting the forecast
+            st.subheader("Hourly Demand Forecast")
+            st.line_chart(df_plot, y=PREDICTION_COL_NAME)
+
+            st.subheader("Raw Data Preview")
+            st.dataframe(df_plot, use_container_width=True)
