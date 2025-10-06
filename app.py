@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 import warnings
 import joblib
 import lightgbm as lgb
+import re
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
@@ -18,7 +19,7 @@ PREDICTION_COL_NAME = 'Predicted_Demand'
 
 GLOBAL_RISK_THRESHOLD = 15500 
 
-# --- HELPER FUNCTIONS FOR TEMPERATURE CATEGORIZATION ---
+# --- UTILITY FUNCTIONS ---
 
 def get_temp_category(temp_c):
     """Categorizes temperature based on demand peak shifting findings."""
@@ -31,12 +32,30 @@ def get_temp_category(temp_c):
     else:
         return 'Summer (Peak Evening > 25°C)'
 
+def clean_column_names(df):
+    """Standardizes column names to match the model's expected format (e.g., removing spaces/symbols)."""
+    # Use re.sub to keep only alphanumeric characters and underscores
+    def clean(col):
+        # Replace non-alphanumeric characters (except underscore) with an underscore
+        cleaned_col = re.sub(r'[^A-Za-z0-9_]+', '_', col)
+        # Remove leading/trailing underscores
+        return cleaned_col.strip('_')
+    
+    df.columns = [clean(col) for col in df.columns]
+    
+    # Specific renames required due to the model's feature names
+    df = df.rename(columns={
+        'Temperature_0_1_degrees_Celsius': TEMP_COL.replace(' ', '_').replace('(','').replace(')','').replace('.','_'),
+        'Dew_Point_Temperature_0_1_degrees_Celsius': 'Dew_Point_Temperature_0_1_degrees_Celsius'
+    })
+    return df
+
 # --- DATA LOADING AND PREDICTION (Highly Robust Function) ---
 
 @st.cache_data
 def load_data_and_predict():
     """
-    Loads data, engineers features, loads the model, and generates predictions.
+    Loads data, engineers features (including OHE), loads the model, and generates predictions.
     Includes robust data loading and feature checking to fix errors.
     """
     data_file_path = 'cleaned_energy_weather_data(1).csv' 
@@ -61,6 +80,9 @@ def load_data_and_predict():
     except Exception as e:
          st.error(f"FATAL DATA ERROR: Unexpected error during data load: {e}")
          st.stop()
+         
+    # 3a. Clean column names to match the model's feature names
+    df = clean_column_names(df)
     
     # 2. Load Model
     try:
@@ -73,16 +95,20 @@ def load_data_and_predict():
     if df[DATE_COL].dt.tz is None:
         df[DATE_COL] = df[DATE_COL].dt.tz_localize('UTC')
     
-    # 3. Feature Engineering (Must create ALL features the model expects)
-    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10.0
-    
+    # 3b. Feature Engineering (Must create ALL features the model expects)
+    # The actual column name from the CSV is 'Temperature_0_1_degrees_Celsius' after cleaning
+    df[TEMP_CELSIUS_COL] = df['Temperature_0_1_degrees_Celsius'] / 10.0 
+
     # Temporal Features
     df['hour'] = df[DATE_COL].dt.hour
     df['dayofweek'] = df[DATE_COL].dt.dayofweek
     df['is_weekend'] = df['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
     df['month'] = df[DATE_COL].dt.month
     df['quarter'] = df[DATE_COL].dt.quarter
-    
+    df['dayofyear'] = df[DATE_COL].dt.dayofyear 
+    df['weekofyear'] = df[DATE_COL].dt.isocalendar().week.astype(int) 
+    df['time_index'] = df.index.to_series().astype(float) 
+
     # Lag and Rolling Features
     df['Demand_MW_lag24'] = df[ORIGINAL_TARGET_COL].shift(24)
     df['Demand_MW_lag48'] = df[ORIGINAL_TARGET_COL].shift(48)
@@ -90,21 +116,40 @@ def load_data_and_predict():
     df['temp_lag24'] = df[TEMP_CELSIUS_COL].shift(24)
     df['temp_roll72'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=72).mean()
     df['temp_roll168'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=168).mean()
+
+    # 3c. One-Hot Encoding (OHE) for Categoricals (CRITICAL FIX)
+    categorical_cols = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate', 'Present_Weather_Code', 'Present_Weather_Code_Indicator']
+    # Filter to only columns that exist *after* cleaning
+    existing_categorical_cols = [c for c in categorical_cols if c in df.columns]
+    df = pd.get_dummies(df, columns=existing_categorical_cols, drop_first=False)
     
-    # Ensure numerical columns used by model have no NaNs (imputation)
+    # 3d. Final Feature Alignment (CRITICAL FIX): Ensure all expected OHE columns exist
     model_features = model.feature_name_
+    
+    # List of all OHE features missing in previous runs (from the error message)
+    expected_ohe_cols = [
+        'MeasureItem_Monthly_Hourly_Load_Values', 'CountryCode_NL', 
+        'CreateDate_03_03_2025_12_24_13', 'CreateDate_04_09_2025_15_45', 
+        'UpdateDate_03_03_2025_12_24_13', 'UpdateDate_04_09_2025_15_45', 
+        'Time_of_Day_Day', 'Time_of_Day_Night', 'Detailed_Time_of_Day_Evening', 
+        'Detailed_Time_of_Day_Midnight', 'Detailed_Time_of_Day_Morning', 
+        'Detailed_Time_of_Day_Night', 'Detailed_Time_of_Day_Noon',
+        # Binary weather columns (cleaned names)
+        'Fog_0_no_1_yes', 'Rainfall_0_no_1_yes', 'Snow_0_no_1_yes', 
+        'Thunder_0_no_1_yes', 'Ice_Formation_0_no_1_yes'
+    ]
+    
+    for col in expected_ohe_cols:
+        if col not in df.columns:
+            df[col] = 0 # Insert missing OHE column with a value of 0
+
+    # Ensure numerical columns used by model have no NaNs (imputation)
     for feature in model_features:
         if feature in df.columns and df[feature].dtype in ['float64', 'int64']:
             df[feature] = df[feature].fillna(df[feature].mean())
     
-    # 4. CRITICAL FIX FOR KEYERROR: Check for missing features before dropna/prediction
-    missing_cols = [f for f in model_features if f not in df.columns]
-    if missing_cols:
-        # If the model expects features that are not in the DataFrame, raise a detailed error
-        st.error(f"FATAL FEATURE ERROR: The LightGBM model requires columns that are missing from the data. Missing features: {', '.join(missing_cols)}")
-        st.stop()
-
-    # Drop NaNs that resulted from creating the lag/roll features, ensuring all model features are present
+    # 4. Filter for rows where prediction is possible
+    # Drop rows where any of the required model features (including lags) are NaN
     df_predict = df.copy().dropna(subset=model_features, how='any')
 
     # 5. Predict (Strictly enforce feature order - FIX for LightGBMError)
@@ -120,7 +165,7 @@ def load_data_and_predict():
 
     return df
 
-# --- VISUALIZATION FUNCTIONS (Unchanged) ---
+# --- VISUALIZATION FUNCTIONS ---
 
 def create_demand_forecast_plot(df: pd.DataFrame):
     """Creates the standard time-series demand and forecast plot (Demand vs Time)."""
@@ -133,7 +178,8 @@ def create_demand_forecast_plot(df: pd.DataFrame):
     
     # Base chart
     base = alt.Chart(df_long).encode(
-        x=alt.X(DATE_COL, title="Date and Time (UTC)"),
+        # FIX: Explicitly set axis format to show both date and hour clearly
+        x=alt.X(DATE_COL, title="Date and Time (UTC)", axis=alt.Axis(format="%Y-%m-%d %H:%M")),
         y=alt.Y('Demand (MW)', title="Energy Demand (MW)"),
         tooltip=[DATE_COL, 'Demand (MW)', 'Type']
     ).properties(height=400)
@@ -160,7 +206,17 @@ def create_hourly_profile_plot(df: pd.DataFrame):
     """Creates a plot of demand vs. hour of day (Time of Day and Demand)."""
     
     df_hourly = df.groupby(['hour', 'Weather_Category'])[PREDICTION_COL_NAME].mean().reset_index(name='Avg Predicted Demand (MW)')
-    dominant_category = df['Weather_Category'].mode().iloc[0].split('(')[1].replace(')', '').strip()
+    
+    # Check if the dataframe is empty or if mode fails
+    if df_hourly.empty:
+        dominant_category = "N/A"
+    else:
+        # Safely determine the dominant category
+        dominant_category_series = df['Weather_Category'].mode()
+        if not dominant_category_series.empty:
+            dominant_category = dominant_category_series.iloc[0].split('(')[1].replace(')', '').strip()
+        else:
+            dominant_category = "N/A"
     
     chart = alt.Chart(df_hourly).mark_line(point=True).encode(
         x=alt.X('hour', title='Hour of Day (0-23)'),
@@ -205,12 +261,13 @@ def display_summary_kpis(df: pd.DataFrame):
         )
     st.markdown("---")
 
-# --- MAIN STREAMLIT APPLICATION (Unchanged) ---
+# --- MAIN STREAMLIT APPLICATION ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Prototype")
-    st.title("💡 Energy Demand Prediction Prototype")
-    st.subheader(f"Project: Early Prediction of Energy Shortages in Dutch Neighborhoods ({datetime.now().strftime('%Y-%m-%d')})")
+    st.set_page_config(layout="wide", page_title="Energy Demand Prediction Model")
+    st.title("💡 Energy Demand Prediction")
+    # FIX: Updated title to reflect National Grid
+    st.subheader(f"Project: Early Prediction of **National ** Energy Demand in the Netherlands ({datetime.now().strftime('%Y-%m-%d')})")
     
     df_full = load_data_and_predict()
     
@@ -266,7 +323,7 @@ def main():
     st.subheader("4. Hourly Demand Profile: Visualizing Temperature-Based Peak Shift 🌡️")
     st.markdown("""
         This plot shows the **average predicted demand profile by hour (0-23)** for the selected period,
-        highlighting the shift in peak demand (Noon for Cold/Mild vs. Evening for Warm/Summer).
+        highlighting the shift in peak demand (**Noon** for Cold/Mild vs. **Evening** for Warm/Summer).
     """)
     create_hourly_profile_plot(df_filtered)
 
