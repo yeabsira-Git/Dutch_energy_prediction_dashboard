@@ -20,8 +20,8 @@ PREDICTION_COL_NAME = 'Predicted_Demand'
 CAPACITY_THRESHOLD = 15000 # Hard limit (in MW)
 
 # NEW THRESHOLD CONSTANTS
-OPERATIONAL_HIGH_THRESHOLD = 14500 # NEW: High Risk Operational threshold (96.7% of 15,000 MW)
-MA_ALERT_BUFFER = 500 # NEW: Buffer (MW) added to the 168-hour Moving Average to filter noise
+OPERATIONAL_HIGH_THRESHOLD = 14500 # High Risk Operational threshold (96.7% of 15,000 MW)
+MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average to filter noise
 
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
@@ -144,7 +144,7 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
             alt.Tooltip(shortage_threshold_col, title="Statistical Pctl (MW)", format=',.2f'),
             # Add Hard Capacity to tooltip
             alt.Tooltip('Hard_Capacity_MW', title="Hard Capacity (MW)", format=',.2f'),
-            alt.Tooltip('Dynamic_Alert_Threshold', title=f"MA + {MA_ALERT_BUFFER} MW", format=',.2f'), # NEW
+            alt.Tooltip('Dynamic_Alert_Threshold', title=f"MA + {MA_ALERT_BUFFER} MW", format=',.2f'), 
             alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)"),
             alt.Tooltip('Time_Period', title="Time Period")
         ]
@@ -220,7 +220,7 @@ def main():
     selected_scenario = st.sidebar.selectbox(
         "1. Select Temperature Scenario:",
         options=list(SCENARIO_MAP.keys()),
-        index=1, 
+        index=0, # Changed default to Cold for testing
         help="Select a fixed temperature profile for the entire forecast period to test scenarios."
     )
     temp_forecast_celsius = SCENARIO_MAP[selected_scenario]
@@ -364,7 +364,6 @@ def main():
     # --- Calculate Dynamic Threshold for the FILTERED (displayed) data ---
     
     # Recalculate the 168-hour MA using ONLY the filtered prediction data
-    # (Note: This is an approximation for the displayed window, but works for the dynamic alert concept)
     df_plot['168_hr_MA'] = df_plot[PREDICTION_COL_NAME].rolling(window=168, min_periods=1).mean()
     df_plot['Dynamic_Alert_Threshold'] = df_plot['168_hr_MA'] + MA_ALERT_BUFFER
     
@@ -403,9 +402,9 @@ def main():
         delta = f"Peak is ↓ {delta_val:,.2f} MW **to Hard Capacity**"
         delta_color = "normal"
         
-    # 3. DYNAMIC ALERT (Significant Spike above MA + Buffer)
-    elif peak_above_dynamic:
-        risk_level = "DYNAMIC ALERT"
+    # 3. DYNAMIC ALERT (Significant Spike above MA + Buffer, but NOT a High Demand event)
+    elif peak_above_dynamic and peak_demand < OPERATIONAL_HIGH_THRESHOLD: # ADDED condition
+        risk_level = "DYNAMIC ALERT (MA Baseline)"
         delta_val = peak_demand - dynamic_trigger_value
         delta = f"↑ {delta_val:,.2f} MW **above MA + {MA_ALERT_BUFFER} MW**"
         delta_color = "normal" 
