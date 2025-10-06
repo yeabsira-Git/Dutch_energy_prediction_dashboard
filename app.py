@@ -308,10 +308,10 @@ if historical_df is not None and model is not None:
                 s_predictions.loc[current_index] = prediction
 
 
-            # --- Display Results ---
+            # --- Display Forecast Results ---
             future_df[PREDICTION_COL_NAME] = s_predictions
             
-            # 1. Filter results to the user's chosen window (2025-10-01 to 2025-10-05)
+            # 1. Filter results to the user's chosen window (e.g., 2025-10-01 to 2025-10-05)
             df_display_window = future_df.loc[forecast_start_dt:forecast_end_dt].copy()
 
             # 2. Drop any remaining NaN predictions (usually just the first 72 hours of the full forecast)
@@ -349,3 +349,40 @@ if historical_df is not None and model is not None:
 
             st.subheader("Raw Data Preview")
             st.dataframe(df_plot[[PREDICTION_COL_NAME] + [f for f in EXPECTED_FEATURES if f in df_plot.columns]].head(10), use_container_width=True)
+
+    # --- 4. Historical Demand Variance Analysis (New Section) ---
+    st.subheader("📊 Historical Demand Variance by Time of Day and Temperature")
+    st.markdown("Analyze how the historical average energy demand (MW) changes throughout the day under different temperature conditions.")
+
+    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
+
+    # Function to categorize temperature (assuming temperature is in 0.1 degree Celsius, so divide by 10)
+    def categorize_temp(temp):
+        temp_c = temp / 10.0
+        if temp_c < 5:
+            return 'Cold (< 5°C)'
+        elif temp_c < 15:
+            return 'Mild (5°C - 15°C)'
+        elif temp_c < 25:
+            return 'Warm (15°C - 25°C)'
+        else:
+            return 'Hot (> 25°C)'
+
+    # Create a copy of historical data to avoid modifying cached data
+    df_analysis = historical_df.copy()
+
+    # Apply categorization
+    if TEMP_COL_SAN in df_analysis.columns and 'hour' in df_analysis.columns:
+        df_analysis['Temp_Category'] = df_analysis[TEMP_COL_SAN].apply(categorize_temp)
+
+        # Group by hour and temperature category, then calculate mean demand
+        df_variance = df_analysis.groupby(['hour', 'Temp_Category'])[TARGET_COL_SANITIZED].mean().unstack()
+
+        # Display the line chart
+        if not df_variance.empty:
+            st.line_chart(df_variance, use_container_width=True)
+            st.caption("Each line represents the average demand across all historical data for the corresponding temperature band, showing variance over 24 hours.")
+        else:
+            st.warning("Historical analysis data is empty or missing required columns.")
+    else:
+        st.error(f"Temperature column ('{TEMP_COL_SAN}') or 'hour' column not found in the historical data for variance analysis.")
