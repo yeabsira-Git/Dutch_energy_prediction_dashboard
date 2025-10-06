@@ -34,7 +34,7 @@ def get_temp_category(temp_c):
 
 def clean_column_names(df):
     """Standardizes column names to match the model's expected format (e.g., removing spaces/symbols)."""
-    # Use re.sub to keep only alphanumeric characters and underscores
+    # Use re.sub to replace non-alphanumeric/underscore characters with an underscore
     def clean(col):
         # Replace non-alphanumeric characters (except underscore) with an underscore
         cleaned_col = re.sub(r'[^A-Za-z0-9_]+', '_', col)
@@ -43,11 +43,6 @@ def clean_column_names(df):
     
     df.columns = [clean(col) for col in df.columns]
     
-    # Specific renames required due to the model's feature names
-    df = df.rename(columns={
-        'Temperature_0_1_degrees_Celsius': TEMP_COL.replace(' ', '_').replace('(','').replace(')','').replace('.','_'),
-        'Dew_Point_Temperature_0_1_degrees_Celsius': 'Dew_Point_Temperature_0_1_degrees_Celsius'
-    })
     return df
 
 # --- DATA LOADING AND PREDICTION (Highly Robust Function) ---
@@ -81,7 +76,7 @@ def load_data_and_predict():
          st.error(f"FATAL DATA ERROR: Unexpected error during data load: {e}")
          st.stop()
          
-    # 3a. Clean column names to match the model's feature names
+    # 3a. Clean column names
     df = clean_column_names(df)
     
     # 2. Load Model
@@ -95,7 +90,7 @@ def load_data_and_predict():
     if df[DATE_COL].dt.tz is None:
         df[DATE_COL] = df[DATE_COL].dt.tz_localize('UTC')
     
-    # 3b. Feature Engineering (Must create ALL features the model expects)
+    # 3b. Feature Engineering
     # The actual column name from the CSV is 'Temperature_0_1_degrees_Celsius' after cleaning
     df[TEMP_CELSIUS_COL] = df['Temperature_0_1_degrees_Celsius'] / 10.0 
 
@@ -117,16 +112,24 @@ def load_data_and_predict():
     df['temp_roll72'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=72).mean()
     df['temp_roll168'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=168).mean()
 
-    # 3c. One-Hot Encoding (OHE) for Categoricals (CRITICAL FIX)
+    # 3c. Clean categorical values before OHE (CRITICAL FIX for OHE KeyErrors)
     categorical_cols = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate', 'Present_Weather_Code', 'Present_Weather_Code_Indicator']
-    # Filter to only columns that exist *after* cleaning
+    
+    # Filter to only columns that exist and apply strip to values
     existing_categorical_cols = [c for c in categorical_cols if c in df.columns]
+
+    for col in existing_categorical_cols:
+        # Check if column is of object/string type and strip whitespace
+        if df[col].dtype == 'object':
+            df[col] = df[col].str.strip()
+
+    # Now perform OHE
     df = pd.get_dummies(df, columns=existing_categorical_cols, drop_first=False)
     
     # 3d. Final Feature Alignment (CRITICAL FIX): Ensure all expected OHE columns exist
     model_features = model.feature_name_
     
-    # List of all OHE features missing in previous runs (from the error message)
+    # List of all OHE features from the error message
     expected_ohe_cols = [
         'MeasureItem_Monthly_Hourly_Load_Values', 'CountryCode_NL', 
         'CreateDate_03_03_2025_12_24_13', 'CreateDate_04_09_2025_15_45', 
@@ -165,7 +168,7 @@ def load_data_and_predict():
 
     return df
 
-# --- VISUALIZATION FUNCTIONS ---
+# --- VISUALIZATION FUNCTIONS (Unchanged) ---
 
 def create_demand_forecast_plot(df: pd.DataFrame):
     """Creates the standard time-series demand and forecast plot (Demand vs Time)."""
@@ -261,13 +264,13 @@ def display_summary_kpis(df: pd.DataFrame):
         )
     st.markdown("---")
 
-# --- MAIN STREAMLIT APPLICATION ---
+# --- MAIN STREAMLIT APPLICATION (Unchanged) ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="Energy Demand Prediction Model")
-    st.title("💡 Energy Demand Prediction")
+    st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Prototype")
+    st.title("💡 Energy Demand Prediction Prototype")
     # FIX: Updated title to reflect National Grid
-    st.subheader(f"Project: Early Prediction of **National ** Energy Demand in the Netherlands ({datetime.now().strftime('%Y-%m-%d')})")
+    st.subheader(f"Project: Early Prediction of **National Grid** Energy Shortages in the Netherlands ({datetime.now().strftime('%Y-%m-%d')})")
     
     df_full = load_data_and_predict()
     
