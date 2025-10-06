@@ -28,17 +28,17 @@ SCENARIO_MAP = {
     "4. Summer (> 25°C)": 30.0      
 }
 
-# --- TIME PERIOD MAPPING (SIMPLIFIED) ---
+# --- TIME PERIOD MAPPING (RESTORED VERBOSE NAMES) ---
 def map_hour_to_period(hour):
-    """Maps the hour (0-23) to a simple Time of Day category."""
+    """Maps the hour (0-23) to a Time of Day category."""
     if 0 <= hour <= 5:
-        return 'Midnight'
+        return 'Midnight (00:00 - 05:59)'
     elif 6 <= hour <= 11:
-        return 'Morning'
+        return 'Morning (06:00 - 11:59)'
     elif 12 <= hour <= 16:
-        return 'Noon'
+        return 'Noon (12:00 - 16:59)'
     elif 17 <= hour <= 23:
-        return 'Evening'
+        return 'Evening (17:00 - 23:59)'
     return 'Other'
 
 
@@ -122,7 +122,7 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
     """Plots Demand, Threshold, and highlights shortage hours for clarity."""
     
     if df_plot.empty:
-        st.info("No data available for the selected date range and/or time periods. Please adjust your filters.")
+        st.info("No data available for the selected time range and/or time periods.")
         return
         
     # Calculate a boolean column for shortage
@@ -222,30 +222,31 @@ def main():
     if len(selected_dates) == 2:
         start_date_filter = pd.to_datetime(selected_dates[0]).tz_localize('UTC').normalize()
         end_date_filter = (pd.to_datetime(selected_dates[1]).tz_localize('UTC').normalize() + pd.Timedelta(hours=23))
+        
+        # RESTORED: Sidebar info box
+        st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
     else:
         st.error("Please select both a start and end date from the calendar.")
         return
 
-    # 3. Time of Day Filter (Now excluding Midnight)
+    # 3. Time of Day Filter (RESTORED VERBOSE NAMES)
     st.sidebar.markdown("---")
     st.sidebar.header("Display Filtering")
     
     TIME_PERIODS = [
-        'Evening', # 17:00 - 23:59 (Peak Risk)
-        'Morning', # 06:00 - 11:59 (Risk Ramp-up)
-        'Noon',    # 12:00 - 16:59 (Mid-day Risk)
-        # 'Midnight' removed to focus on high-demand periods
+        'Evening (17:00 - 23:59)',
+        'Morning (06:00 - 11:59)',
+        'Noon (12:00 - 16:59)',
+        'Midnight (00:00 - 05:59)',
     ]
 
     selected_periods = st.sidebar.multiselect(
-        "3. Filter by Time of Day (Peak Risk Focus):",
+        "3. Filter by Time of Day:",
         options=TIME_PERIODS,
-        default=TIME_PERIODS, # Default to showing all high-risk periods
-        help="Focus the plot on high-demand periods only (Morning, Noon, Evening)."
+        default=TIME_PERIODS, # Default to showing all
+        help="Filter the main graph to focus on peak or off-peak hours."
     )
     
-    # Show the current scenario details cleanly
-    st.markdown(f"**Current Scenario:** {selected_scenario} **({temp_forecast_celsius:.1f}°C)** | **Display Range:** {start_date_filter.strftime('%b %d, %Y')} to {end_date_filter.strftime('%b %d, %Y')}")
     st.markdown("---")
     
     # Apply temperature settings to future_df
