@@ -222,31 +222,29 @@ def main():
     if len(selected_dates) == 2:
         start_date_filter = pd.to_datetime(selected_dates[0]).tz_localize('UTC').normalize()
         end_date_filter = (pd.to_datetime(selected_dates[1]).tz_localize('UTC').normalize() + pd.Timedelta(hours=23))
-        
-        # NOTE: Removed the st.sidebar.info here as requested
     else:
         st.error("Please select both a start and end date from the calendar.")
         return
 
-    # 3. Time of Day Filter (Simplified & Moved)
+    # 3. Time of Day Filter (Now excluding Midnight)
     st.sidebar.markdown("---")
     st.sidebar.header("Display Filtering")
     
     TIME_PERIODS = [
-        'Evening', # 17:00 - 23:59 (Likely Peak)
-        'Morning', # 06:00 - 11:59
-        'Noon',    # 12:00 - 16:59
-        'Midnight', # 00:00 - 05:59
+        'Evening', # 17:00 - 23:59 (Peak Risk)
+        'Morning', # 06:00 - 11:59 (Risk Ramp-up)
+        'Noon',    # 12:00 - 16:59 (Mid-day Risk)
+        # 'Midnight' removed to focus on high-demand periods
     ]
 
     selected_periods = st.sidebar.multiselect(
-        "3. Filter by Time of Day:",
+        "3. Filter by Time of Day (Peak Risk Focus):",
         options=TIME_PERIODS,
-        default=TIME_PERIODS, # Default to showing all
-        help="Filter the main graph to focus on specific daily periods."
+        default=TIME_PERIODS, # Default to showing all high-risk periods
+        help="Focus the plot on high-demand periods only (Morning, Noon, Evening)."
     )
     
-    # Show the current scenario details cleanly (without cluttering the filter section)
+    # Show the current scenario details cleanly
     st.markdown(f"**Current Scenario:** {selected_scenario} **({temp_forecast_celsius:.1f}°C)** | **Display Range:** {start_date_filter.strftime('%b %d, %Y')} to {end_date_filter.strftime('%b %d, %Y')}")
     st.markdown("---")
     
@@ -325,7 +323,7 @@ def main():
     df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
     df_full_plot = df_full_plot.merge(hourly_threshold_df, on='hour', how='left')
     
-    # Add Time_Period column for filtering (Simplified names used here)
+    # Add Time_Period column for filtering
     df_full_plot['Time_Period'] = df_full_plot['hour'].apply(map_hour_to_period)
     
     # Filter the DataFrame based on the Date Calendar and Time of Day selection
