@@ -51,7 +51,7 @@ def create_features(df):
     df['year'] = df.index.year
     df['quarter'] = df.index.quarter
     
-    # Additional Simple Features (Expected by the model features list)
+    # Additional Simple Features 
     df['time_index'] = np.arange(len(df)) + 1 
     df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
 
@@ -69,7 +69,7 @@ def create_features(df):
 
 @st.cache_data
 def load_data():
-    """Loads and preprocesses historical data."""
+    """Loads and preprocesses HISTORICAL data (using your CSV)."""
     data = pd.read_csv('cleaned_energy_weather_data(1).csv')
     data = create_features(data)
     
@@ -132,7 +132,6 @@ def create_u_curve_plot(data_hist, df_plot):
 def create_dual_axis_forecast(df_plot, shortage_threshold):
     """Plots the main forecast with demand and temperature on dual axes."""
     
-    # Base chart for Demand and Temperature lines
     base = alt.Chart(df_plot.reset_index()).encode(
         x=alt.X(DATE_COL, title='Forecast Hour')
     )
@@ -142,7 +141,7 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
         tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Demand")]
     )
 
-    # FIX: Create a separate, small DataFrame for the threshold line to correctly define the tooltip data source.
+    # Create a separate, small DataFrame for the threshold line tooltip
     threshold_df = pd.DataFrame({
         'Threshold_Y': [shortage_threshold],
         'Tooltip_Label': [f'Shortage Threshold ({shortage_threshold:,.0f} MW)']
@@ -150,7 +149,6 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
 
     threshold_line = alt.Chart(threshold_df).mark_rule(color='red', strokeDash=[5, 5]).encode(
         y=alt.Y('Threshold_Y:Q', title='Demand (MW)'),
-        # Reference the 'Tooltip_Label' column (Nominal type) from the threshold_df
         tooltip=[alt.Tooltip('Tooltip_Label:N', title='Threshold')] 
     )
 
@@ -159,7 +157,6 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
         tooltip=[DATE_COL, alt.Tooltip(TEMP_CELSIUS_COL, title="Temp")]
     )
     
-    # Layer all three charts
     chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
         y='independent' 
     ).properties(
@@ -214,6 +211,30 @@ def main():
     target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
     temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
     
+    # ----------------------------------------------------------------------
+    # --- INTERACTIVE INPUT: SCENARIO SELECTION ---
+    # ----------------------------------------------------------------------
+    st.sidebar.header("24-Hour Forecast Scenario")
+    
+    SCENARIOS = {
+        "Cold (0°C - 10°C)": 5.0,     # Representative temperature 5.0°C
+        "Mild (10°C - 20°C)": 15.0,    # Representative temperature 15.0°C
+        "Warm (20°C - 25°C)": 22.5,   # Representative temperature 22.5°C
+        "Summer (> 25°C)": 28.0       # Representative temperature 28.0°C
+    }
+    
+    scenario_selection = st.sidebar.selectbox(
+        "Select Temperature Scenario:",
+        options=list(SCENARIOS.keys()),
+        index=1, # Default to Mild
+        help="Choose a typical temperature range to test its impact on energy demand."
+    )
+    
+    temp_forecast_celsius = SCENARIOS[scenario_selection]
+    
+    st.sidebar.info(f"Using a persistent forecast temperature of **{temp_forecast_celsius:.1f}°C** for the next 24 hours.")
+    st.markdown("---")
+    
     # --- SIMULATE FUTURE DATA FOR PREDICTION (24 hours) ---
     future_start_date = data.index[-1] + pd.Timedelta(hours=1)
     future_dates = pd.date_range(start=future_start_date, periods=24, freq='H', name=DATE_COL)
@@ -222,23 +243,24 @@ def main():
     # Create base features
     future_df = create_features(future_df)
     
-    # Mocking Temperature (Cold Snap Example)
-    temp_shift = (future_df.index.hour - 6) * (2 * np.pi / 24)
-    temp_forecast = (np.cos(temp_shift) * 30) + 20 
-    
+    # Use the interactive temperature input for the entire forecast period
+    # Convert from Celsius to model's expected format (0.1 degrees Celsius)
+    temp_0_1_degrees = (temp_forecast_celsius * 10).astype(int) 
+
     # Set the two temperature columns
-    future_df[temp_col_sanitized] = (temp_forecast * 10).astype(int) 
-    future_df[TEMP_CELSIUS_COL] = future_df[temp_col_sanitized] / 10 
+    future_df[temp_col_sanitized] = temp_0_1_degrees 
+    future_df[TEMP_CELSIUS_COL] = temp_forecast_celsius
     
     # FIX: Initialize the Target Column (needed for concat)
     future_df[target_col_sanitized] = np.nan
     
-    # --- FEATURE ENGINEERING FIX: 
+    # ----------------------------------------------------------------------
+    # --- FEATURE ENGINEERING (Uses Historical Data for Lag/Rolling) ---
+    # ----------------------------------------------------------------------
     
     last_hist = data.tail(1)
     expected_model_features = list(model.feature_name_)
     
-    # Define features that must be CALCULATED (not imputed)
     ADVANCED_LAG_ROLLING_COLS = [
         'Demand_MW_lag24', 'Demand_MW_lag48', 'Demand_MW_roll72', 
         'temp_lag24', 'temp_roll72', 'temp_roll168'
@@ -248,33 +270,25 @@ def main():
     for col in expected_model_features:
         if col not in future_df.columns:
             
-            # CRITICAL FIX: Skip columns that will be CALCULATED next
             if col in ADVANCED_LAG_ROLLING_COLS:
                 continue
             
-            # Imputation Logic for Base/OHE Features 
             if any(cat in col for cat in ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']):
-                # OHE feature
                 if col in last_hist.columns and last_hist[col].iloc[0] == 1:
                     future_df[col] = 1
                 else:
                     future_df[col] = 0
             elif col in last_hist.columns:
-                # Base features (weather/metadata): impute with last historical value
                 future_df[col] = last_hist[col].iloc[0]
             elif col == 'index':
-                # 'index' feature (time-step in the overall data)
                 future_df[col] = np.arange(len(data), len(data) + len(future_df)) + 1
             else:
-                # Fallback for unexpected missing features
                 future_df[col] = 0 
     
     # --- 2. Calculate Advanced Lag/Rolling Features ---
     
-    # Get the list of columns needed for lag/rolling calculations
     lag_cols = [target_col_sanitized, temp_col_sanitized]
-    
-    # Create combined DataFrame containing historical and future temperature/target for lag calculations
+    # This step uses your HISTORICAL data (data[lag_cols]) to calculate lags
     lag_df = pd.concat([data[lag_cols], future_df[lag_cols]]) 
     
     # 2.1. Advanced Demand Features
@@ -287,16 +301,12 @@ def main():
     lag_df['temp_roll72'] = lag_df[temp_col_sanitized].shift(1).rolling(72).mean()
     lag_df['temp_roll168'] = lag_df[temp_col_sanitized].shift(1).rolling(168).mean()
     
-    # Merge calculated features back into future_df (tail excludes historical data)
     lag_features = lag_df.columns.difference(lag_cols)
     future_df = future_df.join(lag_df[lag_features].tail(len(future_df)))
     
     # --- 3. Final Prediction ---
     
-    # Fill any remaining NaNs (e.g., initial rolling window) in the forecast period
     future_df = future_df.fillna(future_df.median())
-    
-    # Select the features in the EXACT order the model expects
     model_features = expected_model_features
 
     future_df[PREDICTION_COL_NAME] = model.predict(future_df[model_features].astype(float))
@@ -305,7 +315,6 @@ def main():
     
     st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
-    # Shortage threshold based on historical 99th percentile
     shortage_threshold = data[target_col_sanitized].quantile(0.99)
     
     df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
