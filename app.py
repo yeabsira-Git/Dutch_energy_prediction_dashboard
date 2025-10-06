@@ -24,6 +24,19 @@ GLOBAL_RISK_THRESHOLD = 15500 # A high statistical peak, used as a fixed red lin
 # Use the time periods as the options list
 TIME_OF_DAY_OPTIONS = ['Morning', 'Noon', 'Evening', 'Midnight']
 
+# --- HELPER FUNCTIONS FOR NEW FEATURES ---
+
+def get_temp_category(temp_c):
+    """Categorizes temperature based on user's EDA findings (in Celsius)."""
+    if temp_c <= 10:
+        return 'Cold (Peak Noon)'
+    elif temp_c <= 20:
+        return 'Mild (Peak Noon)'
+    elif temp_c <= 25:
+        return 'Warm (Peak Evening)'
+    else:
+        return 'Summer (Peak Evening)'
+
 # --- DATA LOADING AND PREDICTION ---
 
 @st.cache_data
@@ -37,249 +50,213 @@ def load_data_and_predict():
     
     # 1. Load Data
     try:
-        # FIX: Using encoding='latin1' and sep=',' to resolve EmptyDataError/ParserError
-        df = pd.read_csv(data_file_path, sep=',', encoding='latin1') 
-    except FileNotFoundError:
-        st.error(f"Data file '{data_file_path}' not found.")
-        return pd.DataFrame()
-    except pd.errors.EmptyDataError:
-        st.error("Error: The CSV file was found but appears to be empty or unreadable (EmptyDataError).")
-        return pd.DataFrame()
-
-    # 2. Basic Feature Engineering (Must match training features)
-    df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True)
+        df = pd.read_csv(data_file_path, parse_dates=[DATE_COL], encoding='latin1')
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        st.stop()
+    
+    # 2. Basic Feature Engineering (Crucial: Temperature conversion)
+    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10.0
     df['hour'] = df[DATE_COL].dt.hour
-    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
-
-    # 3. Time-of-Day Mapping
-    def map_custom_time_of_day(hour):
-        if 0 <= hour <= 5: return 'Midnight'
-        elif 6 <= hour <= 11: return 'Morning'
-        elif 12 <= hour <= 16: return 'Noon'
-        elif 17 <= hour <= 23: return 'Evening'
-        else: return 'Other'
-            
-    df['Detailed_Time_of_Day'] = df['hour'].apply(map_custom_time_of_day)
-    df = df[df['Detailed_Time_of_Day'].isin(TIME_OF_DAY_OPTIONS)].copy()
-
-    # 4. Prepare Features for Model
-    FEATURE_COLS = [
-        'index', 'Cov_ratio', 'Wind Direction (degrees)', 'Hourly Mean Wind Speed (0.1 m/s)', 
-        'Mean Wind Speed (0.1 m/s)', 'Maximum Wind Gust (0.1 m/s)', 
-        'Dew Point Temperature (0.1 degrees Celsius)', 'Sunshine Duration (0.1 hours)', 
-        'Precipitation Duration (0.1 hours)', 'Hourly Precipitation Amount (0.1 mm)', 
-        'Air Pressure (0.1 hPa)', 'Horizontal Visibility', 'Cloud Cover (octants)', 
-        'Relative Atmospheric Humidity (%)', 'Temperature (0.1 degrees Celsius)', 
-        'Global_Radiation_kW/m2', 'hour', TEMP_CELSIUS_COL
-    ]
+    df['dayofweek'] = df[DATE_COL].dt.dayofweek
+    df['is_weekend'] = df['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
     
-    df_features = df[FEATURE_COLS].copy()
+    # 3. Handle required lag/roll features (Mimicking the model's training features)
+    # The joblib model snippet shows these features are needed:
+    # temp_lag24, temp_roll72, temp_roll168, Demand_MW_lag24, Demand_MW_lag48, Demand_MW_roll72
+    df['Demand_MW_lag24'] = df[ORIGINAL_TARGET_COL].shift(24)
+    df['Demand_MW_lag48'] = df[ORIGINAL_TARGET_COL].shift(48)
+    df['Demand_MW_roll72'] = df[ORIGINAL_TARGET_COL].shift(1).rolling(window=72).mean()
+    df['temp_lag24'] = df[TEMP_CELSIUS_COL].shift(24)
+    df['temp_roll72'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=72).mean()
+    df['temp_roll168'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=168).mean()
     
-    # Handle Categorical Columns with One-Hot Encoding (OHE)
-    df_features = pd.concat([df_features, pd.get_dummies(df['CountryCode'], prefix='CountryCode', drop_first=False)], axis=1)
-    df_features = pd.concat([df_features, pd.get_dummies(df['Detailed_Time_of_Day'], prefix='Detailed_Time_of_Day', drop_first=False)], axis=1)
-    
-    # 5. Load Model and Predict
+    # 4. Load Model
     try:
         model = joblib.load(model_file_path)
-    except FileNotFoundError:
-        st.error(f"Model file '{model_file_path}' not found. Cannot generate predictions.")
-        df[PREDICTION_COL_NAME] = np.nan # Add empty prediction column
-        return df
-
-    # Robust Feature Alignment to resolve KeyError
-    try:
-        model_feature_names = list(model.feature_name_)
-        missing_cols = set(model_feature_names) - set(df_features.columns)
-        for col in missing_cols:
-            df_features[col] = 0
-            
-        extra_cols = set(df_features.columns) - set(model_feature_names)
-        df_features = df_features.drop(columns=list(extra_cols))
-        X_predict = df_features[model_feature_names]
-
-    except AttributeError:
-        st.error("Model feature names not found. Skipping prediction.")
-        df[PREDICTION_COL_NAME] = np.nan
-        return df
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        st.stop()
         
-    # Predict
-    df[PREDICTION_COL_NAME] = model.predict(X_predict)
+    # 5. Select Features (Ensure columns match the model's expected features)
+    model_features = model.feature_name_
+    # FIX: Only use features present in the dataframe to avoid errors
+    features_to_predict = [f for f in model_features if f in df.columns]
     
+    # 6. Predict (Handle NaNs introduced by lags by filling/dropping as needed for prediction)
+    # NOTE: The model uses historical and future weather data, so for a real future forecast, 
+    # we'd need forecasted weather. Here we use the actual future weather data in the CSV 
+    # for a "simulated" accurate prediction.
+    df_predict = df.copy().dropna(subset=features_to_predict)
+
+    # Make prediction
+    X_predict = df_predict[features_to_predict]
+    y_pred = model.predict(X_predict)
+    
+    # Merge prediction back to original dataframe (only for rows where prediction was possible)
+    df[PREDICTION_COL_NAME] = np.nan
+    df.loc[df_predict.index, PREDICTION_COL_NAME] = y_pred
+    
+    # Add temperature category
+    df['Weather_Category'] = df[TEMP_CELSIUS_COL].apply(get_temp_category)
+
+    # Final cleanup and return
     return df
 
-# --- PLOTTING FUNCTION (Time Series) ---
+# --- VISUALIZATION FUNCTIONS ---
 
-@st.cache_data
-def create_demand_forecast_plot(df_filtered):
-    """
-    Generates a time-series line chart showing Historical Demand, Predicted Demand, 
-    and relative/absolute risk thresholds.
-    """
-    
-    if df_filtered.empty:
-        st.warning("No data available for the selected period.")
-        return
-
-    # Calculate 168-hour Moving Average (MA) on the historical Demand_MW column
-    # Use rolling window, center=False (trailing average)
-    df_filtered['MA_Demand'] = df_filtered[ORIGINAL_TARGET_COL].rolling(window=MA_WINDOW, min_periods=1).mean()
-    
-    # Calculate Dynamic Alert Threshold: MA + 500 MW
-    df_filtered['Dynamic_Alert'] = df_filtered['MA_Demand'] + MA_ALERT_BUFFER
-    
-    # Melt the DataFrame for Altair plotting (Historical and Predicted)
-    df_plot = df_filtered.melt(
-        id_vars=[DATE_COL, 'MA_Demand', 'Dynamic_Alert', TEMP_CELSIUS_COL, 'Detailed_Time_of_Day'],
-        value_vars=[ORIGINAL_TARGET_COL, PREDICTION_COL_NAME],
-        var_name='Type',
-        value_name='Demand_MW'
+def create_demand_forecast_plot(df: pd.DataFrame):
+    """Creates the standard time-series demand and forecast plot."""
+    df_long = df.melt(
+        id_vars=[DATE_COL], 
+        value_vars=[ORIGINAL_TARGET_COL, PREDICTION_COL_NAME], 
+        var_name='Type', 
+        value_name='Demand (MW)'
     )
     
-    # Base chart setup
-    base = alt.Chart(df_plot).encode(
-        x=alt.X(DATE_COL, title='Date and Time (Hour)'),
-        y=alt.Y('Demand_MW', title='Demand (MW)', scale=alt.Scale(zero=False)),
-        tooltip=[
-            alt.Tooltip(DATE_COL, title='Date/Time'),
-            alt.Tooltip('Demand_MW', title='Demand (MW)', format=',.0f'),
-            alt.Tooltip(TEMP_CELSIUS_COL, title='Temp (°C)', format='.1f'),
-            alt.Tooltip('Detailed_Time_of_Day', title='Time of Day'),
-            'Type'
-        ]
+    # Base chart
+    base = alt.Chart(df_long).encode(
+        x=alt.X(DATE_COL, title="Date and Time (UTC)"),
+        y=alt.Y('Demand (MW)', title="Energy Demand (MW)"),
+        tooltip=[DATE_COL, 'Demand (MW)', 'Type']
     ).properties(
-        title='Historical and Predicted Energy Demand Time-Series'
+        height=400
     )
 
-    # 1. Historical Demand Line (Blue)
-    historical_line = base.transform_filter(
+    # Actual Demand (Blue solid line)
+    actual = base.transform_filter(
         alt.datum.Type == ORIGINAL_TARGET_COL
-    ).mark_line(color='steelblue').encode(
-        # Group by 'Type' so lines don't connect across the gap between historical and predicted data
-        detail='Type' 
-    )
+    ).mark_line(color='blue').properties(title="Demand Forecast (Actual vs. Predicted)")
 
-    # 2. Predicted Demand Line (Orange)
-    predicted_line = base.transform_filter(
+    # Predicted Demand (Orange dashed line)
+    predicted = base.transform_filter(
         alt.datum.Type == PREDICTION_COL_NAME
-    ).mark_line(color='darkorange', strokeDash=[5,5]).encode(
-        detail='Type'
-    )
-    
-    # 3. Global Risk Threshold Line (Red Dashed)
-    global_threshold_line = alt.Chart(pd.DataFrame({'y': [GLOBAL_RISK_THRESHOLD]})).mark_rule(color='red', strokeDash=[2,2]).encode(
-        y='y',
-        tooltip=[alt.Tooltip('y', title='Global Risk Threshold', format=',.0f')]
-    )
+    ).mark_line(color='orange', strokeDash=[5, 5])
 
-    # 4. Dynamic Alert Line (Purple Dotted) - based on Moving Average
-    dynamic_alert_line = alt.Chart(df_filtered).mark_line(color='darkviolet', strokeDash=[1,1]).encode(
-        x=alt.X(DATE_COL),
-        y=alt.Y('Dynamic_Alert'),
-        tooltip=[alt.Tooltip('Dynamic_Alert', title='Dynamic Alert (MA + 500MW)', format=',.0f')]
+    # Risk Threshold (Red horizontal line)
+    risk_line = alt.Chart(pd.DataFrame({'y': [GLOBAL_RISK_THRESHOLD]})).mark_rule(color='red').encode(
+        y='y',
+        tooltip=alt.Tooltip('y', title='Risk Threshold')
     )
     
-    # Combine the charts
-    chart = (historical_line + predicted_line + dynamic_alert_line + global_threshold_line).interactive()
+    st.altair_chart(actual + predicted + risk_line, use_container_width=True)
+
+def create_hourly_profile_plot(df: pd.DataFrame):
+    """Creates a plot of demand vs. hour of day, segmented by temperature category."""
+    
+    # Group by hour and temperature category to show the average predicted demand profile
+    df_hourly = df.groupby(['hour', 'Weather_Category'])[PREDICTION_COL_NAME].mean().reset_index(name='Avg Predicted Demand (MW)')
+    
+    # Determine the overall dominant category for the title
+    dominant_category = df['Weather_Category'].mode().iloc[0]
+    
+    chart = alt.Chart(df_hourly).mark_line(point=True).encode(
+        x=alt.X('hour', title='Hour of Day (0-23)'),
+        y=alt.Y('Avg Predicted Demand (MW)'),
+        color=alt.Color('Weather_Category', title='Weather Category'),
+        tooltip=['hour', 'Weather_Category', alt.Tooltip('Avg Predicted Demand (MW)', format='.0f')]
+    ).properties(
+        title=f"Predicted Hourly Demand Profile by Weather (Dominant: {dominant_category})"
+    )
     
     st.altair_chart(chart, use_container_width=True)
-    
-    # Calculate key metrics for display
-    # Get the last date in the historical data to define the start of the forecast
-    forecast_start_date = df_filtered[df_filtered[ORIGINAL_TARGET_COL].notna()][DATE_COL].max()
-    
-    # Get max predicted demand in the forecast period
-    df_forecast = df_filtered[df_filtered[DATE_COL] > forecast_start_date]
-    
-    if not df_forecast.empty:
-        peak_demand = df_forecast[PREDICTION_COL_NAME].max()
-        peak_row = df_forecast.loc[df_forecast[PREDICTION_COL_NAME].idxmax()]
-        peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
-        peak_temp = peak_row[TEMP_CELSIUS_COL]
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric(
-                label="Forecast Peak Demand (MW)", 
-                value=f"{peak_demand:,.2f}"
-            )
-        with col2:
-            st.metric(
-                label="Peak Time", 
-                value=f"{peak_time_full}"
-            )
-        with col3:
-            st.metric(
-                label="Peak Temperature (°C)", 
-                value=f"{peak_temp:.1f}°C"
-            )
-        
-    st.markdown("---")
-    st.markdown(f"**Global Risk Threshold (Red Dashed Line):** **{GLOBAL_RISK_THRESHOLD:,.0f} MW** (A historical high-water mark for potential shortage risk).")
-    st.markdown(f"**Dynamic Alert Trigger (Purple Dotted Line):** **Moving Average ({MA_WINDOW}-hr) + {MA_ALERT_BUFFER} MW** (Flags a relative spike above normal operating levels).")
 
-# --- STREAMLIT APP LAYOUT ---
+def display_summary_kpis(df: pd.DataFrame):
+    """Displays the predicted peak and low demand for the period."""
+    predicted_peak = df[PREDICTION_COL_NAME].max()
+    predicted_low = df[PREDICTION_COL_NAME].min()
+    
+    peak_time = df.loc[df[PREDICTION_COL_NAME].idxmax(), DATE_COL].strftime('%Y-%m-%d %H:%M')
+    low_time = df.loc[df[PREDICTION_COL_NAME].idxmin(), DATE_COL].strftime('%Y-%m-%d %H:%M')
+    
+    st.subheader("2. Predicted Demand Peak & Low")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric(
+            label="Predicted Peak Demand 📈", 
+            value=f"{predicted_peak:,.0f} MW", 
+            help=f"Occurs at: {peak_time}"
+        )
+    with col2:
+        st.metric(
+            label="Predicted Low Demand 📉", 
+            value=f"{predicted_low:,.0f} MW", 
+            help=f"Occurs at: {low_time}"
+        )
+    st.markdown("---")
+
+
+# --- MAIN STREAMLIT APPLICATION ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="Energy Demand Forecast Dashboard")
-    st.title("⚡ Simple Energy Demand Time-Series and Forecast")
-    st.markdown(f"This dashboard visualizes historical and **predicted energy demand** over time, providing a simple view for your project on **early prediction of energy shortages** in Dutch neighborhoods.")
-
+    st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Prototype (Dutch Neighborhoods)")
+    st.title("💡 Energy Demand Prediction Prototype")
+    st.subheader(f"Project: Early Prediction of Energy Shortages in Dutch Neighborhoods ({datetime.now().strftime('%Y-%m-%d')})")
+    
     df_full = load_data_and_predict()
     
-    if df_full.empty:
-        return
-
     # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUTS: TIME / FORECAST HORIZON ---
+    # --- SIDEBAR CONTROLS ---
     # ----------------------------------------------------------------------
-    st.sidebar.header("Date & Horizon Selection")
+    st.sidebar.header("Controls & Settings")
     
-    # Determine min/max dates for sliders
     min_date = df_full[DATE_COL].min().date()
     max_date = df_full[DATE_COL].max().date()
+    default_start = max_date - timedelta(days=7) # Default to the last 7 days for a quick view
     
-    # Use the last 7 days of the dataset as the default view
-    default_start_date = max_date - timedelta(days=7)
-    
-    # Date Range Selector (The "Time" filter)
+    # Date Slider/Picker for Time Period/Forecast Horizon
     selected_date_range = st.sidebar.slider(
-        "Select Time Period (Date Range):",
+        "📅 Time Period & Forecast Horizon (Days)",
         min_value=min_date,
         max_value=max_date,
-        value=(default_start_date, max_date),
-        format="YYYY-MM-DD",
-        help="Adjust the slider to view a specific time window of historical and predicted data."
+        value=(default_start, max_date),
+        format="YYYY-MM-DD"
     )
+
+    # Simple slider to represent "Forecast Horizon Days" control
+    # Although the date range handles the period, an explicit "days" input is often requested.
+    # Here, we show the duration of the selected range.
+    forecast_days = (selected_date_range[1] - selected_date_range[0]).days
+    st.sidebar.metric("Forecast Horizon Days", f"{forecast_days} days")
     
-    # Convert selected dates to datetime objects for filtering
-    # Need to handle the timezone awareness of the DataFrame column
+    # Handle the timezone awareness of the DataFrame column
     start_dt = datetime.combine(selected_date_range[0], datetime.min.time(), tzinfo=df_full[DATE_COL].dt.tz).tz_convert('UTC')
     end_dt = datetime.combine(selected_date_range[1], datetime.max.time(), tzinfo=df_full[DATE_COL].dt.tz).tz_convert('UTC')
 
-    # Forecast Horizon (Simple Toggle/Filter - implemented via the date slider)
-    st.sidebar.info(
-        "The **Forecast Horizon** is controlled by the **Time Period** slider."
-        "The **Orange Dashed Line** represents the model's prediction, automatically extending from the last **Blue Line** data point."
-    )
-    
     # Filter the DataFrame based on the selected date range
     df_filtered = df_full[
         (df_full[DATE_COL] >= start_dt) & 
         (df_full[DATE_COL] <= end_dt)
     ].copy()
+    
+    if df_filtered.empty:
+        st.warning("No data found for the selected date range. Please adjust the slider.")
+        return
 
     # ----------------------------------------------------------------------
-    # --- DASHBOARD PLOT (Demand vs Hour/Date) ---
+    # --- DASHBOARD PLOTS AND KPIS ---
     # ----------------------------------------------------------------------
-    st.subheader(f"1. Energy Demand Over Time (Viewing {selected_date_range[0]} to {selected_date_range[1]})")
     
+    # FEATURE 1: Display Predicted Peak and Low Demand
+    display_summary_kpis(df_filtered)
+
+    # FEATURE 2: Standard Time Series Plot
+    st.subheader(f"3. Energy Demand Over Time (Viewing {selected_date_range[0]} to {selected_date_range[1]})")
     create_demand_forecast_plot(df_filtered)
 
     st.markdown("---")
-    st.markdown(f"This simple time-series plot directly addresses the need to monitor **demand over the hour/date** and identify potential shortage risks within the **forecast horizon** for your Dutch neighborhoods project.")
+    
+    # FEATURE 3: Demand vs Time (Hour of Day) reflecting EDA findings
+    st.subheader("4. Hourly Demand Profile: Visualizing Temperature-Based Peak Shift")
+    st.markdown("""
+        This plot shows the **average predicted demand profile by hour** for the selected period,
+        highlighting the shift in peak demand based on the dominant weather category: 
+        **Noon** peak for Cold/Mild vs. **Evening** peak for Warm/Summer.
+    """)
+    create_hourly_profile_plot(df_filtered)
 
 
-# Execute the main function
+# Execute the main application
 if __name__ == "__main__":
     main()
