@@ -87,7 +87,6 @@ def create_features(df):
 @st.cache_data
 def load_data():
     """Loads and preprocesses HISTORICAL data."""
-    # NOTE: Assuming 'cleaned_energy_weather_data(1).csv' is available
     data = pd.read_csv('cleaned_energy_weather_data(1).csv') 
     data = create_features(data)
     
@@ -110,7 +109,7 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- PLOTTING FUNCTIONS (Simplified) ---
+# --- PLOTTING FUNCTIONS (Simplified and Robust) ---
 
 def create_demand_risk_plot(df_plot, shortage_threshold_col):
     """Plots Demand, Threshold, and highlights shortage hours."""
@@ -171,19 +170,56 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
     st.altair_chart(chart, use_container_width=True)
 
 def plot_eda_context():
-    """Plots the historical average demand by hour for context."""
+    """Generates and displays the historical average demand by hour for context."""
     
-    # Define the chart JSON path (assuming it was generated as 'demand_vs_hour_by_scenario.json')
+    file_path = 'cleaned_energy_weather_data(1).csv' 
+    
     try:
-        # NOTE: Loading the chart generated in the previous step
-        chart_json = pd.read_json('demand_vs_hour_by_scenario.json') 
-        chart = alt.Chart.from_dict(chart_json)
-        st.altair_chart(chart, use_container_width=True)
-        st.markdown("_This historical plot demonstrates how the average daily demand curve shifts based on temperature, validating the scenario approach._")
+        # NOTE: Read raw data again to be self-contained and avoid cache issues
+        df = pd.read_csv(file_path)
     except FileNotFoundError:
-        st.warning("Could not load the 'Average Demand by Scenario' chart. Ensure the historical analysis step was run.")
-    except Exception:
-        st.warning("Could not load the 'Average Demand by Scenario' chart due to an unexpected error.")
+        st.error("Historical data file not found to generate context plot.")
+        return
+
+    # Preprocessing
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True)
+    df['hour'] = df[DATE_COL].dt.hour
+    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
+
+    def map_temp_to_scenario(temp):
+        """Maps continuous temperature (in Celsius) to one of the four scenarios."""
+        if temp <= 10:
+            return '1. Cold (≤ 10°C)'
+        elif 10 < temp <= 20:
+            return '2. Mild (10°C - 20°C)'
+        elif 20 < temp <= 25:
+            return '3. Warm (20°C - 25°C)'
+        else: 
+            return '4. Summer (> 25°C)'
+
+    # Calculate and plot
+    df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
+    df_avg_demand = df.groupby(['Scenario', 'hour'])[TARGET_COL].mean().reset_index()
+    df_avg_demand.columns = ['Scenario', 'Hour_of_Day', 'Average_Demand_MW']
+
+    base = alt.Chart(df_avg_demand).encode(
+        x=alt.X('Hour_of_Day:O', title='Hour of Day (0 = Midnight)', axis=alt.Axis(labelAngle=0)),
+        y=alt.Y('Average_Demand_MW:Q', title='Average Energy Demand (MW)'),
+        color=alt.Color('Scenario:N', title='Temperature Scenario')
+    )
+    demand_line = base.mark_line(point=True).encode(
+        strokeWidth=alt.value(3),
+        tooltip=[
+            alt.Tooltip('Scenario'),
+            alt.Tooltip('Hour_of_Day', title='Hour'),
+            alt.Tooltip('Average_Demand_MW', title='Avg Demand (MW)', format=',.2f')
+        ]
+    ).properties(
+        title='Historical Average Demand vs. Hour of Day by Temperature Scenario'
+    )
+    
+    st.altair_chart(demand_line, use_container_width=True)
+    st.markdown("_This historical plot demonstrates how the average daily demand curve shifts based on temperature, validating the scenario approach._")
 
 
 # --- STREAMLIT APP LAYOUT ---
@@ -325,6 +361,10 @@ def main():
         
         # Calculate HOURLY 99th Percentile Shortage Threshold 
         hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
+        # >>> FIX: Rename the column to avoid KeyError
+        hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
+        # <<< FIX END
+        
         GLOBAL_RISK_THRESHOLD = hourly_threshold_df['Shortage_Threshold_MW'].max()
         
         # Prepare the full 6-month prediction DataFrame
