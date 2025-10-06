@@ -162,6 +162,9 @@ if historical_df is not None and model is not None:
 
     # Calculate the full forecast end date (hourly data)
     forecast_end_dt = forecast_start_dt + pd.Timedelta(days=forecast_days) - pd.Timedelta(hours=1)
+    
+    # Define the fixed, true start of the forecast period (end of historical data)
+    FORECAST_BEGIN_DT = pd.to_datetime('2025-07-01 00:00:00')
 
     st.sidebar.markdown("---")
 
@@ -232,13 +235,13 @@ if historical_df is not None and model is not None:
             df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df_encoded], axis=0)
             df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
 
-            # Select only the needed future index
-            idx_forecast = pd.date_range(start=forecast_start_dt, end=forecast_end_dt, freq='h')
-            df_temp = df_combined.loc[idx_forecast].copy()
+            # Select the full index from the end of historical data up to the user's requested end date
+            idx_full_forecast = pd.date_range(start=FORECAST_BEGIN_DT, end=forecast_end_dt, freq='h')
+            df_temp = df_combined.loc[idx_full_forecast].copy()
 
             # CRITICAL FIX 1: Align feature set to the model's expected features
             # Initialize future_df with the full feature set (including the lag columns)
-            future_df = pd.DataFrame(0, index=df_temp.index, columns=EXPECTED_FEATURES)
+            future_df = pd.DataFrame(0, index=idx_full_forecast, columns=EXPECTED_FEATURES)
 
             # Copy over all common features (exogenous and time-based features)
             for col in df_temp.columns:
@@ -262,11 +265,11 @@ if historical_df is not None and model is not None:
             last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
 
             # Initialize prediction series (will be populated during loop)
-            s_predictions = pd.Series(index=idx_forecast, dtype=float)
+            s_predictions = pd.Series(index=idx_full_forecast, dtype=float)
             
-            st.write(f"Forecasting from **{forecast_start_dt}** to **{forecast_end_dt}** (Total: {len(idx_forecast)} hours)")
+            st.write(f"Calculating full recursive path from **{FORECAST_BEGIN_DT}** to **{forecast_end_dt}**...")
 
-            for i, current_index in enumerate(idx_forecast):
+            for i, current_index in enumerate(idx_full_forecast):
 
                 # 1. Prepare the row for the current timestamp (using the aligned future_df)
                 X_current = future_df.loc[[current_index]].copy()
@@ -307,10 +310,20 @@ if historical_df is not None and model is not None:
 
             # --- Display Results ---
             future_df[PREDICTION_COL_NAME] = s_predictions
-            # Drop the first 72 hours of NaN predictions and any rows where prediction failed
-            df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME]) 
+            
+            # 1. Filter results to the user's chosen window (2025-10-01 to 2025-10-05)
+            df_display_window = future_df.loc[forecast_start_dt:forecast_end_dt].copy()
 
-            st.success("Forecast Complete! Results displayed below.")
+            # 2. Drop any remaining NaN predictions (usually just the first 72 hours of the full forecast)
+            df_plot = df_display_window.dropna(subset=[PREDICTION_COL_NAME]) 
+
+            # Safety check to prevent errors if the user selects a start date too early
+            if df_plot.empty:
+                st.error(f"Cannot display results for the selected window: **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}**. Please ensure your start date is at least 72 hours after **{FORECAST_BEGIN_DT.date()}**.")
+                st.stop()
+
+
+            st.success(f"Forecast Complete! Results for **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}** displayed below.")
 
             # Shortage analysis (Simplified)
             shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.99) # Use the historical 99th percentile
