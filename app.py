@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import re
-from datetime import datetime
+from datetime import datetime, date
 import lightgbm as lgb
 import altair as alt 
 from sklearn.metrics import mean_squared_error
@@ -23,10 +23,10 @@ CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_
 # --- SCENARIO MAPPING ---
 # Representative temperature used for the full 6-month prediction for each scenario
 SCENARIO_MAP = {
-    "1. Cold (0°C - 10°C)": 5.0,     # Midpoint
-    "2. Mild (10°C - 20°C)": 15.0,   # Midpoint
-    "3. Warm (20°C - 25°C)": 22.5,   # Midpoint
-    "4. Summer (> 25°C)": 30.0      # Representative high value for summer demand
+    "1. Cold (0°C - 10°C)": 5.0,     
+    "2. Mild (10°C - 20°C)": 15.0,   
+    "3. Warm (20°C - 25°C)": 22.5,   
+    "4. Summer (> 25°C)": 30.0      
 }
 
 # --- 1. UTILITY FUNCTIONS ---
@@ -117,6 +117,7 @@ def create_u_curve_plot(data_hist, df_plot):
     temp_demand = data_hist.groupby(temp_bins)['Demand_MW'].mean().reset_index()
     temp_demand[TEMP_CELSIUS_COL] = temp_demand[temp_bins.name].apply(lambda x: x.mid)
 
+    # Get peak prediction from the currently filtered data
     peak_pred = df_plot.loc[df_plot['Predicted_Demand'].idxmax()]
     
     chart_hist = alt.Chart(temp_demand).mark_line(point=True).encode(
@@ -139,37 +140,57 @@ def create_u_curve_plot(data_hist, df_plot):
     
     st.altair_chart(chart_hist + chart_peak, use_container_width=True)
 
-def create_dual_axis_forecast_hourly(df_plot, shortage_threshold_col):
-    """Plots the main forecast with demand and temperature on dual axes, 
-    using a dynamic hourly threshold column."""
+def create_demand_risk_plot(df_plot, shortage_threshold_col):
+    """Plots Demand, Threshold, and highlights shortage hours for clarity."""
+    
+    # Calculate a boolean column for shortage
+    df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
     
     base = alt.Chart(df_plot).encode( 
-        x=alt.X(DATE_COL, title='Forecast Date')
-    )
-
-    demand_line = base.mark_line(color='#1f77b4').encode(
-        y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)', axis=alt.Axis(titleColor='#1f77b4')),
-        tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Demand")]
-    )
-
-    # Threshold line is drawn from the dynamic hourly column
-    threshold_line = base.mark_line(color='red', strokeDash=[5, 5]).encode(
-        y=alt.Y(shortage_threshold_col, title='Demand (MW)'),
-        tooltip=[alt.Tooltip(shortage_threshold_col, title='Hourly 99th Pctl')] 
-    )
-
-    temp_line = base.mark_line(color='#ff7f0e').encode(
-        y=alt.Y(TEMP_CELSIUS_COL, title='Temperature (°C)', axis=alt.Axis(titleColor='#ff7f0e')),
-        tooltip=[DATE_COL, alt.Tooltip(TEMP_CELSIUS_COL, title="Temp")]
+        x=alt.X(DATE_COL, title='Forecast Date (Hourly)')
     )
     
-    chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
-        y='independent' 
-    ).properties(
-        title='Filtered Forecast: Demand (Blue) & Dynamic Hourly Threshold (Red)'
+    # 1. Prediction Line (Blue)
+    demand_line = base.mark_line(color='#1f77b4').encode(
+        y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)'),
+        tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Demand (MW)")]
+    )
+    
+    # 2. Dynamic Threshold Line (Red Dashed)
+    threshold_line = base.mark_line(color='red', strokeDash=[5, 5]).encode(
+        y=alt.Y(shortage_threshold_col),
+        tooltip=[alt.Tooltip(shortage_threshold_col, title='Hourly 99th Pctl (MW)')] 
+    )
+
+    # 3. Shortage Highlight (Orange Bars) - Only show when risk is True
+    shortage_highlight = base.mark_bar(color='#ff7f0e').encode(
+        y=alt.Y(PREDICTION_COL_NAME),
+        tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Shortage Demand (MW)")]
+    ).transform_filter(
+        alt.FieldOneOfPredicate(field='Shortage_Risk', oneOf=[True])
+    )
+    
+    chart = (demand_line + threshold_line + shortage_highlight).properties(
+        title='Forecast Demand & Shortage Hours vs. Dynamic Hourly Threshold'
     )
     
     st.altair_chart(chart, use_container_width=True)
+
+def create_temperature_plot(df_plot):
+    """Plots the constant temperature scenario over time."""
+    # Ensure there is data to plot before accessing iloc[0]
+    if df_plot.empty:
+        return
+        
+    base = alt.Chart(df_plot).encode( 
+        x=alt.X(DATE_COL, title='Forecast Date (Hourly)'),
+    )
+    temp_line = base.mark_line(color='green').encode(
+        y=alt.Y(TEMP_CELSIUS_COL, title=f'Temperature (°C) - {df_plot[TEMP_CELSIUS_COL].iloc[0]:.1f}°C Scenario'),
+        tooltip=[DATE_COL, alt.Tooltip(TEMP_CELSIUS_COL, title="Temperature (°C)")]
+    )
+    st.altair_chart(temp_line, use_container_width=True)
+
 
 def create_time_of_day_variance_plot(data_hist, df_plot):
     """Compares the predicted hourly demand profile against the historical average profile."""
@@ -178,7 +199,7 @@ def create_time_of_day_variance_plot(data_hist, df_plot):
     avg_profile = data_hist.groupby('hour')[target_col_sanitized].mean().reset_index()
     avg_profile.columns = ['hour', 'Average_Demand']
     
-    # FIX: df_plot is already reset in main(), so we avoid the redundant reset_index().
+    # df_plot is already reset in main(), so we avoid the redundant reset_index().
     forecast_profile = df_plot.rename(columns={DATE_COL: 'temp_date'}).copy()
     
     forecast_profile = forecast_profile.groupby('hour')[PREDICTION_COL_NAME].mean().reset_index()
@@ -230,43 +251,48 @@ def main():
     future_df = create_features(future_df)
 
     # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUTS: SCENARIO SELECTION AND DATE RANGE SLIDER ---
+    # --- INTERACTIVE INPUTS: SCENARIO SELECTION AND CALENDAR INPUT ---
     # ----------------------------------------------------------------------
     st.sidebar.header("6-Month Forecast Scenario Controls")
     
-    # 1. Temperature Scenario Selection (Replacing the continuous slider)
+    # 1. Temperature Scenario Selection
     selected_scenario = st.sidebar.selectbox(
         "1. Select Temperature Scenario:",
         options=list(SCENARIO_MAP.keys()),
         index=1, # Default to Mild (10-20C)
         help="Select a fixed temperature profile for the entire forecast period to test scenarios."
     )
-    # Map the selection to the representative temperature
     temp_forecast_celsius = SCENARIO_MAP[selected_scenario]
     
     
-    # 2. Date Range Slider (Zoom Control)
+    # 2. Date Range Calendar Input (New)
     full_date_range = future_df.index.normalize().unique()
     
-    # Default to showing the last 30 days of the forecast
-    default_start = full_date_range[-30] 
-    default_end = full_date_range[-1]
+    # Define default period (e.g., last 30 days)
+    default_start_date = full_date_range[-30].date()
+    default_end_date = full_date_range[-1].date()
     
-    selected_date_range = st.sidebar.slider(
-        "2. Zoom Forecast Display Range:",
-        min_value=full_date_range.min().to_pydatetime(),
-        max_value=full_date_range.max().to_pydatetime(),
-        value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
-        step=pd.Timedelta(days=1),
-        format="MMM DD",
-        help="Select the start and end date to zoom into the results (e.g., Q4 analysis)."
+    # Use st.date_input for a calendar-like selection
+    selected_dates = st.sidebar.date_input(
+        "2. Select Forecast Display Range (Calendar):",
+        value=(default_start_date, default_end_date),
+        min_value=full_date_range.min().date(),
+        max_value=full_date_range.max().date(),
+        help="Use the calendar to choose the start and end dates to zoom into the results."
     )
     
-    # Convert selected dates back to pandas Timestamps (and normalize to start/end of day)
-    start_date_filter = pd.to_datetime(selected_date_range[0]).normalize()
-    end_date_filter = pd.to_datetime(selected_date_range[1]).normalize() + pd.Timedelta(hours=23)
-    
-    st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
+    # Process selected dates
+    if len(selected_dates) == 2:
+        # Convert selected date objects (start of day) to Timestamps
+        start_date_filter = pd.to_datetime(selected_dates[0]).normalize()
+        # End date must include the final hour of the selected day
+        end_date_filter = pd.to_datetime(selected_dates[1]).normalize() + pd.Timedelta(hours=23)
+        
+        st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
+    else:
+        st.error("Please select both a start and end date from the calendar.")
+        return
+
     st.markdown("---")
     
     # Apply temperature settings to future_df
@@ -278,7 +304,7 @@ def main():
     future_df[target_col_sanitized] = np.nan
     
     # ----------------------------------------------------------------------
-    # --- FEATURE ENGINEERING (Lag/Rolling) ---
+    # --- FEATURE ENGINEERING (Lag/Rolling) --- (Omitted for brevity, code remains the same)
     # ----------------------------------------------------------------------
     
     last_hist = data.tail(1)
@@ -344,22 +370,21 @@ def main():
     df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
     df_full_plot = df_full_plot.merge(hourly_threshold_df, on='hour', how='left')
     
-    # Filter the DataFrame based on the Date Slider selection
+    # Filter the DataFrame based on the Date Calendar selection
     df_plot = df_full_plot[
         (df_full_plot[DATE_COL] >= start_date_filter) & 
         (df_full_plot[DATE_COL] <= end_date_filter)
-    ]
+    ].copy()
     
     # --- RISK ANALYSIS using the FILTERED (displayed) data ---
     
     max_shortage_threshold = hourly_threshold_df['Shortage_Threshold_MW'].max()
 
-    peak_demand = df_plot[PREDICTION_COL_NAME].max()
-    
     if df_plot.empty:
          st.error("No data points in the selected date range. Please widen your date selection.")
          return
          
+    peak_demand = df_plot[PREDICTION_COL_NAME].max()
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
@@ -410,20 +435,23 @@ def main():
     
     st.subheader("2. Explainable Forecast Drivers")
     
-    st.markdown("#### 2.1. Filtered Forecast: Demand vs. Dynamic Hourly Threshold")
-    create_dual_axis_forecast_hourly(df_plot, 'Shortage_Threshold_MW')
+    # 2.1. Demand and Risk (The clearer version)
+    st.markdown("#### 2.1. Demand Risk: Shortage Hours Highlighted 🚨")
+    create_demand_risk_plot(df_plot, 'Shortage_Threshold_MW')
+    
+    # 2.2. Temperature Plot (Separated for Clarity)
+    st.markdown("#### 2.2. Constant Temperature Scenario")
+    create_temperature_plot(df_plot)
 
     
     colA, colB = st.columns(2)
     
     with colA:
-        st.markdown("#### 2.2. Historical U-Curve Validation")
-        # Use filtered data for peak highlight, but historical data for curve
+        st.markdown("#### 2.3. Historical U-Curve Validation")
         create_u_curve_plot(data, df_plot)
         
     with colB:
-        st.markdown("#### 2.3. Hourly Profile Variance")
-        # Use filtered data for predicted profile, historical data for average
+        st.markdown("#### 2.4. Hourly Profile Variance")
         create_time_of_day_variance_plot(data, df_plot)
 
 
