@@ -17,7 +17,7 @@ MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 
 # List of categorical columns identified from the model's expected features
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
-TARGET_COL_SANITIZED = 'Demand_MW' # Hardcoded as sanitize_feature_names(['Demand_MW']) will be 'Demand_MW'
+TARGET_COL_SANITIZED = 'Demand_MW' # Sanitize result for TARGET_COL
 
 # --- 1. UTILITY FUNCTIONS (Copied from Training Script) ---
 
@@ -276,8 +276,8 @@ if historical_df is not None and model is not None:
 
                 # --- ROBUST LAG CALCULATION ---
                 # Update the lag features directly in the current row (X_current)
-                X_current.loc[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
-                X_current.loc[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
+                X_current.at[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
+                X_current.at[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
                 
                 roll72_window_end = current_index - pd.Timedelta(hours=24)
                 roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
@@ -289,12 +289,12 @@ if historical_df is not None and model is not None:
                     # Rolling mean calculation for the window *ending* at T-24
                     roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
                     
-                X_current.loc[current_index, LAG_COLS[2]] = roll72_val
+                X_current.at[current_index, LAG_COLS[2]] = roll72_val
                 # ------------------------------
 
                 # 3. Predict the current time step
-                # CRITICAL CHECK: Only predict when target lags are available (i.e., roll72_val is not NaN)
-                if not np.isnan(X_current.loc[current_index, LAG_COLS[2]].iloc[0]):
+                # CRITICAL FIX: Use .at accessor for robust single-value retrieval
+                if not np.isnan(X_current.at[current_index, LAG_COLS[2]]):
                     # Select the features the model expects, which are guaranteed to exist and be float now
                     prediction = model.predict(X_current[EXPECTED_FEATURES])[0]
                 else:
