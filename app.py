@@ -17,12 +17,12 @@ TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Retained for plot display reference
+CAPACITY_THRESHOLD = 15000 
 
 # RELATIVE RISK THRESHOLDS
-MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average to filter noise
+MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average
 
-# CRITICAL PERIODS BASED ON USER'S PLOT ANALYSIS
+# NOTE: CRITICAL PERIODS ARE NO LONGER USED FOR RISK STATUS BUT KEPT FOR REFERENCE.
 COLD_MILD_CRITICAL_PERIOD = 'Noon (12:00 - 16:59)'
 WARM_SUMMER_CRITICAL_PERIOD = 'Evening (17:00 - 23:59)'
 
@@ -36,21 +36,7 @@ SCENARIO_MAP = {
     "4. Summer (> 25°C)": 30.0      
 }
 
-# --- TIME PERIOD MAPPING ---
-def map_hour_to_period(hour):
-    """Maps the hour (0-23) to a Time of Day category based on the EDA definition."""
-    if 0 <= hour <= 5:
-        return 'Midnight (00:00 - 05:59)'
-    elif 6 <= hour <= 11:
-        return 'Morning (06:00 - 11:59)'
-    elif 12 <= hour <= 16:
-        return 'Noon (12:00 - 16:59)'
-    elif 17 <= hour <= 23:
-        return 'Evening (17:00 - 23:59)'
-    return 'Other'
-
-
-# --- 1. UTILITY FUNCTIONS ---
+# --- UTILITY FUNCTIONS ---
 
 def sanitize_feature_names(columns):
     """Sanitizes feature names to be compatible with LightGBM and pandas."""
@@ -96,12 +82,13 @@ def create_features(df):
     
     return df
 
-# --- 2. DATA/MODEL LOADING ---
+# --- DATA/MODEL LOADING ---
 
 @st.cache_data
 def load_data():
-    """Loads and preprocesses HISTORICAL data (using your CSV)."""
-    data = pd.read_csv('cleaned_energy_weather_data(1).csv')
+    """Loads and preprocesses HISTORICAL data."""
+    # NOTE: Assuming 'cleaned_energy_weather_data(1).csv' is available
+    data = pd.read_csv('cleaned_energy_weather_data(1).csv') 
     data = create_features(data)
     
     # Perform One-Hot Encoding on the historical data
@@ -110,7 +97,6 @@ def load_data():
     # Sanitize all columns (including new OHE ones)
     data.columns = sanitize_feature_names(data.columns)
     
-    # Forward fill (ffill) weather/lag data if any NaNs remain
     data = data.ffill()
     return data
 
@@ -124,27 +110,18 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- 3. PLOTTING FUNCTIONS ---
+# --- PLOTTING FUNCTIONS (Simplified) ---
 
-def create_demand_risk_plot(df_plot, shortage_threshold_col, current_critical_period):
-    """Plots Demand, Threshold, and highlights shortage hours and critical spikes."""
+def create_demand_risk_plot(df_plot, shortage_threshold_col):
+    """Plots Demand, Threshold, and highlights shortage hours."""
     
     if df_plot.empty:
-        st.info("No data available for the selected time range and/or time periods.")
+        st.info("No data available for the selected time range.")
         return
         
     df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
     df_plot['Hard_Capacity_MW'] = CAPACITY_THRESHOLD
     
-    # NEW: Identify points that are both a dynamic spike AND in the critical period
-    if current_critical_period:
-        df_plot['Critical_Spike'] = (
-            (df_plot[PREDICTION_COL_NAME] > df_plot['Dynamic_Alert_Threshold']) &
-            (df_plot['Time_Period'] == current_critical_period)
-        )
-    else:
-        df_plot['Critical_Spike'] = False
-        
     base = alt.Chart(df_plot).encode( 
         x=alt.X(DATE_COL, title='Forecast Date (Hourly)'),
         tooltip=[
@@ -154,14 +131,13 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col, current_critical_pe
             alt.Tooltip('Hard_Capacity_MW', title="Capacity Reference (MW)", format=',.2f'),
             alt.Tooltip('Dynamic_Alert_Threshold', title=f"MA + {MA_ALERT_BUFFER} MW", format=',.2f'), 
             alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)"),
-            alt.Tooltip('Time_Period', title="Time Period")
         ]
     )
     
-    # 1. Prediction Line (Color-coded by Time_Period)
+    # 1. Prediction Line 
     demand_line = base.mark_line(point=True).encode(
         y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)'),
-        color=alt.Color('Time_Period', title='Time of Day Segment'),
+        color=alt.value('darkblue'), # Simplified to one color
         strokeWidth=alt.value(2)
     )
     
@@ -187,32 +163,34 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col, current_critical_pe
         alt.FieldOneOfPredicate(field='Shortage_Risk', oneOf=[True])
     )
     
-    # 6. Critical Spike Highlight (Large Gold Dot)
-    critical_spike_dot = base.mark_point(
-        filled=True,
-        color='gold', 
-        size=100, 
-        stroke='red',
-        strokeWidth=2
-    ).encode(
-        y=alt.Y(PREDICTION_COL_NAME),
-    ).transform_filter(
-        alt.FieldOneOfPredicate(field='Critical_Spike', oneOf=[True])
-    )
-
     # Combine all lines and marks
-    chart = (demand_line + threshold_line + capacity_line + dynamic_line + shortage_highlight + critical_spike_dot).properties(
-        title='Hourly Energy Demand Forecast: Relative Risk & Time-of-Day Spikes (Gold Dots)'
+    chart = (demand_line + threshold_line + capacity_line + dynamic_line + shortage_highlight).properties(
+        title=f'Hourly Energy Demand Forecast for {df_plot[TEMP_CELSIUS_COL].iloc[0]:.1f}°C Scenario'
     )
     
     st.altair_chart(chart, use_container_width=True)
 
+def plot_eda_context():
+    """Plots the historical average demand by hour for context."""
+    
+    # Define the chart JSON path (assuming it was generated as 'demand_vs_hour_by_scenario.json')
+    try:
+        # NOTE: Loading the chart generated in the previous step
+        chart_json = pd.read_json('demand_vs_hour_by_scenario.json') 
+        chart = alt.Chart.from_dict(chart_json)
+        st.altair_chart(chart, use_container_width=True)
+        st.markdown("_This historical plot demonstrates how the average daily demand curve shifts based on temperature, validating the scenario approach._")
+    except FileNotFoundError:
+        st.warning("Could not load the 'Average Demand by Scenario' chart. Ensure the historical analysis step was run.")
+    except Exception:
+        st.warning("Could not load the 'Average Demand by Scenario' chart due to an unexpected error.")
 
-# --- 4. STREAMLIT APP LAYOUT ---
+
+# --- STREAMLIT APP LAYOUT ---
 
 def main():
     st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Dashboard")
-    st.title("⚡ Dutch Neighborhood Energy Shortage Predictor (Relative Risk Mode)")
+    st.title("⚡ Dutch Neighborhood Energy Shortage Predictor (Scenario Focus)")
     st.markdown("---")
 
     data = load_data()
@@ -231,7 +209,6 @@ def main():
     future_dates = pd.date_range(start=future_start_date, end=future_end_date, freq='H', name=DATE_COL)
     future_df = pd.DataFrame(index=future_dates)
     
-    # Create base time features on the full 6-month period
     future_df = create_features(future_df)
 
     # ----------------------------------------------------------------------
@@ -274,24 +251,6 @@ def main():
         st.error("Please select both a start and end date from the calendar.")
         return
 
-    # 3. Time of Day Filter 
-    st.sidebar.markdown("---")
-    st.sidebar.header("Display Filtering")
-    
-    TIME_PERIODS = [
-        'Evening (17:00 - 23:59)',
-        'Morning (06:00 - 11:59)',
-        'Noon (12:00 - 16:59)',
-        'Midnight (00:00 - 05:59)',
-    ]
-
-    selected_periods = st.sidebar.multiselect(
-        "3. Filter by Time of Day:",
-        options=TIME_PERIODS,
-        default=TIME_PERIODS, # Default to showing all
-        help="Filter the main graph to focus on peak or off-peak hours."
-    )
-    
     st.markdown("---")
     
     # Apply temperature settings to future_df
@@ -314,10 +273,8 @@ def main():
         'temp_lag24', 'temp_roll72', 'temp_roll168'
     ]
 
-    # --- 1. Impute Base and One-Hot Encoded (OHE) Features ---
     for col in expected_model_features:
         if col not in future_df.columns:
-            
             if col in ADVANCED_LAG_ROLLING_COLS:
                 continue
             
@@ -333,8 +290,7 @@ def main():
             else:
                 future_df[col] = 0 
     
-    # --- 2. Calculate Advanced Lag/Rolling Features ---
-    
+    # 2. Calculate Advanced Lag/Rolling Features 
     lag_cols = [target_col_sanitized, temp_col_sanitized]
     lag_df = pd.concat([data[lag_cols], future_df[lag_cols]]) 
     
@@ -349,8 +305,7 @@ def main():
     lag_features = lag_df.columns.difference(lag_cols)
     future_df = future_df.join(lag_df[lag_features].tail(len(future_df)))
     
-    # --- 3. Final Prediction (Full 6-Months) ---
-    
+    # 3. Final Prediction (Full 6-Months) 
     future_df = future_df.fillna(future_df.median())
     model_features = expected_model_features
 
@@ -358,137 +313,101 @@ def main():
     
     # --- DASHBOARD LAYOUT AND METRICS ---
     
-    st.subheader("1. Core Relative Risk Metrics & Shortage Analysis")
+    col_context, col_analysis = st.columns([1, 1])
     
-    # Calculate HOURLY 99th Percentile Shortage Threshold 
-    hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
-    hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
-    
-    # GLOBAL_RISK_THRESHOLD is the absolute historical high statistical limit
-    GLOBAL_RISK_THRESHOLD = hourly_threshold_df['Shortage_Threshold_MW'].max()
-    
-    # Prepare the full 6-month prediction DataFrame
-    df_full_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
-    df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
-    
-    # Apply the single, flat threshold for plotting and statistical risk flagging
-    df_full_plot['Global_Risk_Threshold_MW'] = GLOBAL_RISK_THRESHOLD
-    
-    # Add Time_Period column for filtering
-    df_full_plot['Time_Period'] = df_full_plot['hour'].apply(map_hour_to_period)
-    
-    # Filter the DataFrame based on the Date Calendar and Time of Day selection
-    df_plot = df_full_plot[
-        (df_full_plot[DATE_COL] >= start_date_filter) & 
-        (df_full_plot[DATE_COL] <= end_date_filter) &
-        (df_full_plot['Time_Period'].isin(selected_periods)) 
-    ].copy()
-    
-    # --- Calculate Dynamic Threshold for the FILTERED (displayed) data ---
-    
-    # Recalculate the 168-hour MA using ONLY the filtered prediction data
-    df_plot['168_hr_MA'] = df_plot[PREDICTION_COL_NAME].rolling(window=168, min_periods=1).mean()
-    df_plot['Dynamic_Alert_Threshold'] = df_plot['168_hr_MA'] + MA_ALERT_BUFFER
-    
-    
-    # --- RISK ANALYSIS using the FILTERED (displayed) data ---
-    
-    if df_plot.empty:
-         st.error("No data points for the selected date range and time periods. Please adjust your filters.")
-         return
-         
-    peak_demand = df_plot[PREDICTION_COL_NAME].max()
-    peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
-    peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
-    peak_temp = peak_row[TEMP_CELSIUS_COL]
-    peak_time_period = peak_row['Time_Period'] 
-    dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
-    
-    # Check if the peak is above the dynamic threshold
-    peak_above_dynamic = peak_demand > dynamic_trigger_value
-    
-    # Determine the critical period for the currently selected scenario
-    scenario_type = selected_scenario.split('(')[0].strip()
-    is_critical_time = False
-    current_critical_period = None
+    with col_context:
+        st.subheader("1. Historical Context: Average Daily Demand Curves")
+        # Display the new EDA context plot
+        plot_eda_context()
 
-    if ('Cold' in scenario_type or 'Mild' in scenario_type):
-        scenario_group = "Cold/Mild"
-        current_critical_period = COLD_MILD_CRITICAL_PERIOD
-    elif ('Warm' in scenario_type or 'Summer' in scenario_type):
-        scenario_group = "Warm/Summer"
-        current_critical_period = WARM_SUMMER_CRITICAL_PERIOD
-    
-    if current_critical_period and peak_time_period == current_critical_period:
-        is_critical_time = True
-
-
-    # --- REVISED RELATIVE RISK LOGIC (HIGH DEMAND / DYNAMIC SPIKE / LOW DEMAND) ---
-    
-    # 1. HIGH DEMAND (Absolute Statistical High - Reserved for 99th Pctl breaches)
-    if peak_demand > GLOBAL_RISK_THRESHOLD:
-        risk_level = "HIGH DEMAND"
-        delta_val = peak_demand - GLOBAL_RISK_THRESHOLD
-        delta = f"↑ {delta_val:,.2f} MW **above Global 99th Pctl!** (Absolute High)"
-        delta_color = "inverse" # Red/High Danger
+    with col_analysis:
+        st.subheader("2. Core Forecast Risk Metrics & Analysis")
         
-    # 2. DYNAMIC SPIKE (Short-term surge - This is the requested change)
-    elif peak_above_dynamic:
-        risk_level = "DYNAMIC SPIKE" # <--- CHANGED
-        delta_val = peak_demand - dynamic_trigger_value
+        # Calculate HOURLY 99th Percentile Shortage Threshold 
+        hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
+        GLOBAL_RISK_THRESHOLD = hourly_threshold_df['Shortage_Threshold_MW'].max()
         
-        if is_critical_time:
-             # This spike matches the criteria for the Gold Dot highlight
-             delta = f"↑ {delta_val:,.2f} MW **above MA (Critical Period Spike - Gold Dot)**"
-        else:
-            delta = f"↑ {delta_val:,.2f} MW **above MA (General Spike)**"
+        # Prepare the full 6-month prediction DataFrame
+        df_full_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
+        df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
+        df_full_plot['Global_Risk_Threshold_MW'] = GLOBAL_RISK_THRESHOLD
+        
+        # Filter the DataFrame based on the Date Calendar
+        df_plot = df_full_plot[
+            (df_full_plot[DATE_COL] >= start_date_filter) & 
+            (df_full_plot[DATE_COL] <= end_date_filter) 
+        ].copy()
+        
+        # Calculate Dynamic Threshold for the FILTERED (displayed) data
+        df_plot['168_hr_MA'] = df_plot[PREDICTION_COL_NAME].rolling(window=168, min_periods=1).mean()
+        df_plot['Dynamic_Alert_Threshold'] = df_plot['168_hr_MA'] + MA_ALERT_BUFFER
+        
+        
+        # --- RISK ANALYSIS ---
+        
+        if df_plot.empty:
+             st.error("No data points for the selected date range. Please adjust your filters.")
+             return
+             
+        peak_demand = df_plot[PREDICTION_COL_NAME].max()
+        peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
+        peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
+        peak_temp = peak_row[TEMP_CELSIUS_COL]
+        peak_hour = peak_row['hour']
+        dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
+        
+        peak_above_dynamic = peak_demand > dynamic_trigger_value
+
+        # --- SIMPLIFIED RELATIVE RISK LOGIC (HIGH DEMAND / DYNAMIC SPIKE / LOW DEMAND) ---
+        
+        if peak_demand > GLOBAL_RISK_THRESHOLD:
+            risk_level = "HIGH DEMAND"
+            delta_val = peak_demand - GLOBAL_RISK_THRESHOLD
+            delta = f"↑ {delta_val:,.2f} MW **above Global 99th Pctl!**"
+            delta_color = "inverse"
             
-        delta_color = "normal" # Orange/Warning
-    
-    # 3. LOW DEMAND (Routine Conditions)
-    else:
-        risk_level = "LOW DEMAND"
-        margin_below_dynamic = dynamic_trigger_value - peak_demand if dynamic_trigger_value > peak_demand else 0 
-        delta = f"Peak is ↓ {margin_below_dynamic:,.2f} MW **below Dynamic Alert Threshold**"
-        delta_color = "off" # Grey/Low Alert
+        elif peak_above_dynamic:
+            risk_level = "DYNAMIC SPIKE"
+            delta_val = peak_demand - dynamic_trigger_value
+            delta = f"↑ {delta_val:,.2f} MW **above MA (Short-Term Surge)**"
+            delta_color = "normal"
         
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="Forecast Risk Status (Filtered View)", 
-            value=risk_level, 
-            delta=delta,
-            delta_color=delta_color 
-        )
-    with col2:
-        st.metric(
-            label="Peak Predicted Demand (MW)", 
-            value=f"{peak_demand:,.2f}", 
-            delta=f"Peak Time Period: {peak_time_period}",
-            delta_color="off"
-        )
-    with col3:
-        st.metric(
-            label="Forecast Temperature at Peak (°C)", 
-            value=f"{peak_temp:.1f}°C", 
-            delta=f"Time: {peak_time_full}", 
-            delta_color="off"
-        )
-    
-    # Display the thresholds used for the relative risk model
-    st.markdown(f"**High Demand Trigger (Absolute Statistical Peak):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line on Plot)")
-    st.markdown(f"**Dynamic Alert Trigger (Relative Spike):** **{dynamic_trigger_value:,.2f} MW** (MA + {MA_ALERT_BUFFER} MW, Purple Dotted Line on Plot)")
-    st.markdown(f"**Time-of-Day Critical Periods:** Cold/Mild: **{COLD_MILD_CRITICAL_PERIOD}** | Warm/Summer: **{WARM_SUMMER_CRITICAL_PERIOD}**")
+        else:
+            risk_level = "LOW DEMAND"
+            margin_below_dynamic = dynamic_trigger_value - peak_demand if dynamic_trigger_value > peak_demand else 0 
+            delta = f"Peak is ↓ {margin_below_dynamic:,.2f} MW **below Dynamic Alert Threshold**"
+            delta_color = "off"
+            
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric(
+                label="Forecast Risk Status (Filtered View)", 
+                value=risk_level, 
+                delta=delta,
+                delta_color=delta_color 
+            )
+        with col2:
+            st.metric(
+                label="Peak Predicted Demand (MW)", 
+                value=f"{peak_demand:,.2f}", 
+                delta=f"Peak Hour: {peak_hour:02d}:00",
+                delta_color="off"
+            )
+
+        st.markdown(f"**Scenario Temperature:** **{peak_temp:.1f}°C** (Fixed for Forecast)")
+        st.markdown(f"**Absolute Risk Trigger (99th Pctl):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line)")
+        st.markdown(f"**Relative Spike Trigger (MA + 500 MW):** **{dynamic_trigger_value:,.2f} MW** (Purple Dotted Line)")
+        
     st.markdown("---")
     
     # --- DASHBOARD PLOTS ---
     
-    st.subheader("2. Hourly Energy Demand Forecast and Relative Risk (Color-Coded by Time of Day)")
+    st.subheader("3. Hourly Demand Forecast for Selected Period")
     
-    # Pass the current critical period to the plot function for highlighting
-    create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW', current_critical_period)
+    # Call the simplified plot function
+    create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW')
 
 
 # Execute the main function
