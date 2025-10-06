@@ -34,9 +34,13 @@ def load_historical_data():
     file_path = 'cleaned_energy_weather_data(1).csv' 
     
     try:
-        df = pd.read_csv(file_path)
+        # FIX: Added encoding='latin1' to prevent EmptyDataError due to parsing issues
+        df = pd.read_csv(file_path, encoding='latin1') 
     except FileNotFoundError:
         st.error("Historical data file 'cleaned_energy_weather_data(1).csv' not found.")
+        return pd.DataFrame()
+    except pd.errors.EmptyDataError:
+        st.error("Error: The CSV file was found but appears to be empty or unreadable (EmptyDataError).")
         return pd.DataFrame()
 
     # Convert DateUTC to datetime and extract the hour (assuming UTC time is used consistently)
@@ -120,6 +124,7 @@ def main():
     df_historical = load_historical_data()
     
     if df_historical.empty:
+        # Error handling will be displayed by the load function
         return
 
     # ----------------------------------------------------------------------
