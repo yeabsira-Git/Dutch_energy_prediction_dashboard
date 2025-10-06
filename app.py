@@ -38,8 +38,10 @@ def create_features(df):
     """Creates basic time and temperature features."""
     
     if DATE_COL in df.columns:
-        df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
-        df = df.set_index(DATE_COL)
+        # Ensure the date column is present for setting the index
+        if DATE_COL not in df.index.names:
+             df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
+             df = df.set_index(DATE_COL)
         
     # Basic Time Features
     df['hour'] = df.index.hour
@@ -107,6 +109,7 @@ def create_u_curve_plot(data_hist, df_plot):
     temp_demand = data_hist.groupby(temp_bins)['Demand_MW'].mean().reset_index()
     temp_demand[TEMP_CELSIUS_COL] = temp_demand[temp_bins.name].apply(lambda x: x.mid)
 
+    # Use the median of the forecast temperature for a single point on the U-Curve
     peak_pred = df_plot.loc[df_plot['Predicted_Demand'].idxmax()]
     
     chart_hist = alt.Chart(temp_demand).mark_line(point=True).encode(
@@ -124,7 +127,7 @@ def create_u_curve_plot(data_hist, df_plot):
     ).encode(
         x=alt.X(TEMP_CELSIUS_COL),
         y=alt.Y('Predicted_Demand'),
-        tooltip=[alt.Tooltip(TEMP_CELSIUS_COL, title="Peak Temp"), alt.Tooltip('Predicted_Demand', title="Peak Demand")]
+        tooltip=[alt.Tooltip(TEMP_CELSIUS_COL, title="Forecast Temp"), alt.Tooltip('Predicted_Demand', title="Peak Demand")]
     )
     
     st.altair_chart(chart_hist + chart_peak, use_container_width=True)
@@ -132,8 +135,10 @@ def create_u_curve_plot(data_hist, df_plot):
 def create_dual_axis_forecast(df_plot, shortage_threshold):
     """Plots the main forecast with demand and temperature on dual axes."""
     
-    base = alt.Chart(df_plot.reset_index()).encode(
-        x=alt.X(DATE_COL, title='Forecast Hour')
+    df_plot = df_plot.reset_index().rename(columns={'index': DATE_COL})
+
+    base = alt.Chart(df_plot).encode(
+        x=alt.X(DATE_COL, title='Forecast Date (Jul 1 - Dec 31, 2025)')
     )
 
     demand_line = base.mark_line(color='#1f77b4').encode(
@@ -160,7 +165,7 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
     chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
         y='independent' 
     ).properties(
-        title='24-Hour Forecast: Demand (Blue) & Temperature (Orange)'
+        title='6-Month Forecast: Demand (Blue) & Temperature (Orange)'
     )
     
     st.altair_chart(chart, use_container_width=True)
@@ -214,43 +219,48 @@ def main():
     # ----------------------------------------------------------------------
     # --- INTERACTIVE INPUT: CONTINUOUS SLIDER ---
     # ----------------------------------------------------------------------
-    st.sidebar.header("24-Hour Forecast Scenario")
+    st.sidebar.header("6-Month Forecast Scenario (Jul 1 - Dec 31, 2025)")
     
-    # Replaced st.selectbox with st.slider for continuous temperature control
     temp_forecast_celsius = st.sidebar.slider(
-        "Set Persistent Forecast Temperature (°C):",
-        min_value=-15.0, # Allows extreme cold
+        "Set Persistent Forecast Temperature (°C) for 6 Months:",
+        min_value=-15.0, 
         max_value=35.0,
         value=15.0, # Default to a mild temperature
         step=0.5,
         format='%.1f °C',
-        help="Use this slider to simulate a constant temperature over the next 24 hours and observe the predicted demand response."
+        help="Simulate a constant temperature over the entire 6-month period (July-Dec) to observe the long-term predictive response."
     )
     
-    st.sidebar.info(f"Using a constant forecast temperature of **{temp_forecast_celsius:.1f}°C** for the next 24 hours.")
+    st.sidebar.info(f"The demand will be predicted based on a constant **{temp_forecast_celsius:.1f}°C** for the next 6 months.")
     st.markdown("---")
     
-    # --- SIMULATE FUTURE DATA FOR PREDICTION (24 hours) ---
-    future_start_date = data.index[-1] + pd.Timedelta(hours=1)
-    future_dates = pd.date_range(start=future_start_date, periods=24, freq='H', name=DATE_COL)
+    # --- GENERATE FUTURE DATA FOR PREDICTION (July 1, 2025 - Dec 31, 2025) ---
+    
+    # Start date is the hour after the last historical entry (e.g., 2025-06-30 22:00:00)
+    future_start_date = data.index[-1] + pd.Timedelta(hours=1) 
+    # End date is the end of the year, as requested (2025-12-31 23:00:00)
+    future_end_date = datetime(2025, 12, 31, 23, 0, 0, tzinfo=future_start_date.tzinfo)
+    
+    # Generate dates for the entire forecast period 
+    future_dates = pd.date_range(start=future_start_date, end=future_end_date, freq='H', name=DATE_COL)
     future_df = pd.DataFrame(index=future_dates)
     
-    # Create base features
+    # Create base time features
     future_df = create_features(future_df)
     
-    # Use the interactive temperature input for the entire forecast period
-    # CORRECTED: Use int() for type conversion of the Python float.
+    # Apply the interactive temperature input to the entire 6-month period
+    # Corrected type conversion: float to int (0.1 degrees Celsius format)
     temp_0_1_degrees = int(temp_forecast_celsius * 10) 
 
     # Set the two temperature columns
     future_df[temp_col_sanitized] = temp_0_1_degrees 
     future_df[TEMP_CELSIUS_COL] = temp_forecast_celsius
     
-    # FIX: Initialize the Target Column (needed for concat)
+    # FIX: Initialize the Target Column (needed for lag/rolling concat)
     future_df[target_col_sanitized] = np.nan
     
     # ----------------------------------------------------------------------
-    # --- FEATURE ENGINEERING (Uses Historical Data for Lag/Rolling) ---
+    # --- FEATURE ENGINEERING (Lag/Rolling) ---
     # ----------------------------------------------------------------------
     
     last_hist = data.tail(1)
@@ -269,11 +279,13 @@ def main():
                 continue
             
             if any(cat in col for cat in ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']):
+                # Impute OHE features by taking the last known state from historical data
                 if col in last_hist.columns and last_hist[col].iloc[0] == 1:
                     future_df[col] = 1
                 else:
                     future_df[col] = 0
             elif col in last_hist.columns:
+                # Impute static features with the last known value
                 future_df[col] = last_hist[col].iloc[0]
             elif col == 'index':
                 future_df[col] = np.arange(len(data), len(data) + len(future_df)) + 1
@@ -283,10 +295,10 @@ def main():
     # --- 2. Calculate Advanced Lag/Rolling Features ---
     
     lag_cols = [target_col_sanitized, temp_col_sanitized]
-    # This step uses your HISTORICAL data (data[lag_cols]) to calculate lags
+    # Concatenate historical data with the future DataFrame (which has NaN for the target)
     lag_df = pd.concat([data[lag_cols], future_df[lag_cols]]) 
     
-    # 2.1. Advanced Demand Features
+    # 2.1. Advanced Demand Features (will use historical data for the first few days of lag)
     lag_df['Demand_MW_lag24'] = lag_df[target_col_sanitized].shift(24)
     lag_df['Demand_MW_lag48'] = lag_df[target_col_sanitized].shift(48)
     lag_df['Demand_MW_roll72'] = lag_df[target_col_sanitized].shift(1).rolling(72).mean()
@@ -301,6 +313,7 @@ def main():
     
     # --- 3. Final Prediction ---
     
+    # Fill any remaining NaNs (primarily the first few hours of lag features)
     future_df = future_df.fillna(future_df.median())
     model_features = expected_model_features
 
@@ -313,10 +326,12 @@ def main():
     shortage_threshold = data[target_col_sanitized].quantile(0.99)
     
     df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
+    
+    # Analysis based on the 6-month prediction
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
     
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
-    peak_time = peak_row.name.strftime('%H:%M')
+    peak_time_full = peak_row.name.strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
     
     # Risk calculation
@@ -338,9 +353,9 @@ def main():
     
     with col1:
         st.metric(
-            label="Shortage Risk Score (24H)", 
+            label="Shortage Risk Score (6-Month Forecast)", 
             value=risk_level, 
-            delta=f"Peak Time: {peak_time}",
+            delta=f"Peak Time: {peak_time_full}",
             delta_color="off" 
         )
     with col2:
@@ -352,9 +367,9 @@ def main():
         )
     with col3:
         st.metric(
-            label="Predicted Temperature at Peak (°C)", 
+            label="Forecast Temperature at Peak (°C)", 
             value=f"{peak_temp:.1f}°C", 
-            delta=f"Time: {peak_time}", 
+            delta=f"Time: {peak_time_full}", 
             delta_color="off"
         )
         
@@ -364,7 +379,7 @@ def main():
     
     st.subheader("2. Explainable Forecast Drivers")
     
-    st.markdown("#### 2.1. Dual-Axis Forecast: Demand vs. Temperature")
+    st.markdown("#### 2.1. Long-Term Forecast: Demand vs. Temperature")
     create_dual_axis_forecast(df_plot, shortage_threshold)
 
     
