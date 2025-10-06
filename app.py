@@ -17,12 +17,12 @@ TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Retained for plot display, but NOT used for risk status logic
+CAPACITY_THRESHOLD = 15000 # Retained for plot display reference
 
 # RELATIVE RISK THRESHOLDS
 MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average to filter noise
 
-# NEW CRITICAL PERIODS BASED ON USER'S PLOT ANALYSIS
+# CRITICAL PERIODS BASED ON USER'S PLOT ANALYSIS
 COLD_MILD_CRITICAL_PERIOD = 'Noon (12:00 - 16:59)'
 WARM_SUMMER_CRITICAL_PERIOD = 'Evening (17:00 - 23:59)'
 
@@ -126,27 +126,31 @@ def load_model():
 
 # --- 3. PLOTTING FUNCTIONS ---
 
-def create_demand_risk_plot(df_plot, shortage_threshold_col):
-    """Plots Demand, Threshold, and highlights shortage hours for clarity."""
+def create_demand_risk_plot(df_plot, shortage_threshold_col, current_critical_period):
+    """Plots Demand, Threshold, and highlights shortage hours and critical spikes."""
     
     if df_plot.empty:
         st.info("No data available for the selected time range and/or time periods.")
         return
         
-    # Calculate a boolean column for shortage
-    # NOTE: Shortage risk is still based on the statistical threshold for the visualization
     df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
-    
-    # Add a column for the Hard Capacity Threshold for plotting
     df_plot['Hard_Capacity_MW'] = CAPACITY_THRESHOLD
     
+    # NEW: Identify points that are both a dynamic spike AND in the critical period
+    if current_critical_period:
+        df_plot['Critical_Spike'] = (
+            (df_plot[PREDICTION_COL_NAME] > df_plot['Dynamic_Alert_Threshold']) &
+            (df_plot['Time_Period'] == current_critical_period)
+        )
+    else:
+        df_plot['Critical_Spike'] = False
+        
     base = alt.Chart(df_plot).encode( 
         x=alt.X(DATE_COL, title='Forecast Date (Hourly)'),
         tooltip=[
             DATE_COL, 
             alt.Tooltip(PREDICTION_COL_NAME, title="Demand (MW)", format=',.2f'),
             alt.Tooltip(shortage_threshold_col, title="Statistical Pctl (MW)", format=',.2f'),
-            # Add Hard Capacity to tooltip
             alt.Tooltip('Hard_Capacity_MW', title="Capacity Reference (MW)", format=',.2f'),
             alt.Tooltip('Dynamic_Alert_Threshold', title=f"MA + {MA_ALERT_BUFFER} MW", format=',.2f'), 
             alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)"),
@@ -183,9 +187,22 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
         alt.FieldOneOfPredicate(field='Shortage_Risk', oneOf=[True])
     )
     
-    # Combine all lines and bars
-    chart = (demand_line + threshold_line + capacity_line + dynamic_line + shortage_highlight).properties(
-        title='Hourly Energy Demand Forecast: Prediction, Statistical Limits, and Dynamic Baseline'
+    # 6. Critical Spike Highlight (Large Gold Dot)
+    critical_spike_dot = base.mark_point(
+        filled=True,
+        color='gold', 
+        size=100, 
+        stroke='red',
+        strokeWidth=2
+    ).encode(
+        y=alt.Y(PREDICTION_COL_NAME),
+    ).transform_filter(
+        alt.FieldOneOfPredicate(field='Critical_Spike', oneOf=[True])
+    )
+
+    # Combine all lines and marks
+    chart = (demand_line + threshold_line + capacity_line + dynamic_line + shortage_highlight + critical_spike_dot).properties(
+        title='Hourly Energy Demand Forecast: Relative Risk & Time-of-Day Spikes (Gold Dots)'
     )
     
     st.altair_chart(chart, use_container_width=True)
@@ -384,26 +401,28 @@ def main():
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
-    peak_time_period = peak_row['Time_Period'] # Get the time period for the peak
+    peak_time_period = peak_row['Time_Period'] 
     dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
     
     # Check if the peak is above the dynamic threshold
     peak_above_dynamic = peak_demand > dynamic_trigger_value
     
-    # Determine if the peak occurred in a Time-of-Day Critical Period
-    scenario_type = selected_scenario.split('(')[0].strip() # e.g., '1. Cold' -> '1. Cold'
+    # Determine the critical period for the currently selected scenario
+    scenario_type = selected_scenario.split('(')[0].strip()
     is_critical_time = False
+    current_critical_period = None
 
-    if ('Cold' in scenario_type or 'Mild' in scenario_type) and peak_time_period == COLD_MILD_CRITICAL_PERIOD:
-        is_critical_time = True
-        critical_period_name = COLD_MILD_CRITICAL_PERIOD
+    if ('Cold' in scenario_type or 'Mild' in scenario_type):
         scenario_group = "Cold/Mild"
-        
-    elif ('Warm' in scenario_type or 'Summer' in scenario_type) and peak_time_period == WARM_SUMMER_CRITICAL_PERIOD:
-        is_critical_time = True
-        critical_period_name = WARM_SUMMER_CRITICAL_PERIOD
+        current_critical_period = COLD_MILD_CRITICAL_PERIOD
+    elif ('Warm' in scenario_type or 'Summer' in scenario_type):
         scenario_group = "Warm/Summer"
+        current_critical_period = WARM_SUMMER_CRITICAL_PERIOD
     
+    if current_critical_period and peak_time_period == current_critical_period:
+        is_critical_time = True
+
+
     # --- SIMPLIFIED RELATIVE RISK LOGIC (LOW/HIGH DEMAND ONLY) ---
     
     # 1. HIGH DEMAND (Absolute Statistical High or Dynamic Spike)
@@ -418,9 +437,10 @@ def main():
         delta_val = peak_demand - dynamic_trigger_value
         
         if is_critical_time:
-             delta = f"↑ {delta_val:,.2f} MW **above MA in critical {scenario_group} period ({critical_period_name})**"
+             # This spike matches the criteria for the Gold Dot highlight
+             delta = f"↑ {delta_val:,.2f} MW **above MA (Critical Period Spike - Gold Dot)**"
         else:
-            delta = f"↑ {delta_val:,.2f} MW **above MA (Non-critical period spike)**"
+            delta = f"↑ {delta_val:,.2f} MW **above MA (General Spike)**"
             
         delta_color = "normal"
     
@@ -466,8 +486,8 @@ def main():
     
     st.subheader("2. Hourly Energy Demand Forecast and Relative Risk (Color-Coded by Time of Day)")
     
-    # Pass the Global 99th Pctl as the threshold for the plot
-    create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW')
+    # Pass the current critical period to the plot function for highlighting
+    create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW', current_critical_period)
 
 
 # Execute the main function
