@@ -326,21 +326,23 @@ if historical_df is not None and model is not None:
             st.success(f"Forecast Complete! Results for **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}** displayed below.")
 
             # Shortage analysis (Simplified)
-            shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.99) # Use the historical 99th percentile
+            # CHANGED: Use the historical 90th percentile of the actual Demand_MW column
+            shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.90) 
 
             col1, col2 = st.columns(2)
             with col1:
                 st.metric(label="Peak Predicted Demand", value=f"{df_plot[PREDICTION_COL_NAME].max():,.2f} MW")
             with col2:
-                st.metric(label="Shortage Threshold (99th Percentile)", value=f"{shortage_threshold:,.2f} MW")
+                # CHANGED: Updated the label to reflect the 90th percentile threshold
+                st.metric(label="Shortage Threshold (90th Percentile)", value=f"{shortage_threshold:,.2f} MW")
 
             shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]
 
             if not shortage_hours.empty:
-                st.warning(f"🚨 **SHORTAGE ALERT:** Predicted demand exceeds the 99th percentile threshold during **{len(shortage_hours)} hours** in the forecast period.")
+                st.warning(f"🚨 **HIGH DEMAND ALERT:** Predicted demand exceeds the 90th percentile threshold during **{len(shortage_hours)} hours** in the forecast period. This requires proactive planning.")
                 st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)
             else:
-                st.info("No extreme shortage events predicted above the 99th percentile threshold.")
+                st.info("Predicted demand is below the 90th percentile threshold for high-stress events.")
 
 
             # Plotting the forecast
