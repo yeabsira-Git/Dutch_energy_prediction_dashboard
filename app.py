@@ -259,9 +259,7 @@ def main():
 
     # Forecast Horizon (Simple Toggle/Filter - implemented via the date slider)
     st.sidebar.info(
-        "The **Forecast Horizon** is controlled by the **Time Period** slider.
-
-"
+        "The **Forecast Horizon** is controlled by the **Time Period** slider."
         "The **Orange Dashed Line** represents the model's prediction, automatically extending from the last **Blue Line** data point."
     )
     
