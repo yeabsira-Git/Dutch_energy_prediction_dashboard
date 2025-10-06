@@ -6,7 +6,6 @@ from datetime import datetime
 import warnings
 import joblib
 import lightgbm as lgb
-
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
@@ -42,9 +41,13 @@ def load_data_and_predict():
     model_file_path = MODEL_FILENAME
     
     try:
-        df = pd.read_csv(data_file_path, sep=',') 
+        # FIX: Added encoding='latin1' to handle non-UTF-8 characters and resolve EmptyDataError/ParserError.
+        df = pd.read_csv(data_file_path, sep=',', encoding='latin1') 
     except FileNotFoundError:
         st.error(f"Data file '{data_file_path}' not found.")
+        return pd.DataFrame()
+    except pd.errors.EmptyDataError:
+        st.error("Error: The CSV file was found but appears to be empty or unreadable (EmptyDataError).")
         return pd.DataFrame()
 
     # 2. Basic Feature Engineering (Must match training features)
@@ -87,7 +90,6 @@ def load_data_and_predict():
     df_features = df[FEATURE_COLS].copy()
     
     # Handle Categorical Columns with One-Hot Encoding (OHE)
-    # FIX: Using drop_first=False to ensure all OHE columns are created, preventing potential mismatches.
     df_features = pd.concat([df_features, pd.get_dummies(df['CountryCode'], prefix='CountryCode', drop_first=False)], axis=1)
     df_features = pd.concat([df_features, pd.get_dummies(df['Detailed_Time_of_Day'], prefix='Detailed_Time_of_Day', drop_first=False)], axis=1)
     
@@ -102,12 +104,12 @@ def load_data_and_predict():
     try:
         model_feature_names = list(model.feature_name_)
         
-        # --- FIX: Robust Feature Alignment to resolve KeyError ---
+        # --- Robust Feature Alignment ---
         
         # Identify columns required by the model but missing in the current feature set
         missing_cols = set(model_feature_names) - set(df_features.columns)
         
-        # Add missing columns (common for OHE features not present in the current data slice) and set their value to 0
+        # Add missing columns and set their value to 0
         for col in missing_cols:
             df_features[col] = 0
             
@@ -116,7 +118,6 @@ def load_data_and_predict():
         df_features = df_features.drop(columns=list(extra_cols))
             
         # Filter and reorder the DataFrame to only include columns the model was trained on
-        # This addresses the original KeyError by ensuring all columns are present before reindexing
         X_predict = df_features[model_feature_names]
 
     except AttributeError:
@@ -128,9 +129,10 @@ def load_data_and_predict():
     
     return df
 
-# --- PLOTTING FUNCTIONS (Unchanged from previous successful step) ---
+# --- PLOTTING FUNCTIONS (Omitted for brevity, they remain unchanged) ---
 
 @st.cache_data
+# ... create_demand_heatmap function ...
 def create_demand_heatmap(df):
     """Generates a heatmap of Median Predicted Demand vs. Time of Day and Scenario."""
     
@@ -178,8 +180,8 @@ def create_demand_heatmap(df):
         """
     )
 
-
 @st.cache_data
+# ... create_time_of_day_boxplots function ...
 def create_time_of_day_boxplots(df, selected_scenario):
     """Generates four side-by-side box plots for all Time of Day periods, filtered by Scenario, using Predicted Demand."""
     
@@ -212,7 +214,8 @@ def create_time_of_day_boxplots(df, selected_scenario):
     st.altair_chart(chart, use_container_width=True)
     st.markdown(f"**Visualization Details:** These four side-by-side box plots show the detailed distribution (quartiles and outliers) of **Predicted Demand** across your custom time periods, specifically when the temperature is in the **{selected_scenario}** range.")
 
-# --- STREAMLIT APP LAYOUT ---
+
+# --- STREAMLIT APP LAYOUT (Omitted for brevity, it remains unchanged) ---
 
 def main():
     st.set_page_config(layout="wide", page_title="Energy Demand Prediction Scenario Visualizer")
