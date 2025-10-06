@@ -104,7 +104,7 @@ def load_model():
 
 @st.cache_data
 def create_historical_boxplot():
-    """Generates and displays the historical demand distribution by temperature scenario using a box plot."""
+    """Generates and displays the historical demand distribution by detailed time of day and temperature scenario using a faceted box plot."""
     
     file_path = 'cleaned_energy_weather_data(1).csv' 
     
@@ -128,24 +128,48 @@ def create_historical_boxplot():
             return '3. Warm (20°C - 25°C)'
         else: 
             return '4. Summer (> 25°C)'
-
+            
     # Calculate and plot
     df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
 
+    # Define a custom order for Time of Day for better readability
+    time_of_day_order = ['Midnight', 'Morning', 'Noon', 'Evening', 'Night']
+    
+    # Ensure the Detailed_Time_of_Day column is clean
+    if 'Detailed_Time_of_Day' in df.columns:
+        df['Detailed_Time_of_Day'] = df['Detailed_Time_of_Day'].astype(str).str.strip()
+        # Filter to only the main periods for clarity
+        df = df[df['Detailed_Time_of_Day'].isin(time_of_day_order)]
+    else:
+        st.error("Error: 'Detailed_Time_of_Day' column not found in historical data.")
+        return
+
+    # Create the Faceted Box Plot
     chart = alt.Chart(df).mark_boxplot(extent=1.5).encode(
-        x=alt.X('Scenario:N', title='Temperature Scenario', sort=list(SCENARIO_MAP.keys())),
+        # X-axis: Scenario (grouped within the column facet, axis=None to hide redundant label)
+        x=alt.X('Scenario:N', axis=None), 
+        # Y-axis: Demand
         y=alt.Y(TARGET_COL, title='Historical Demand (MW)', scale=alt.Scale(zero=False)),
-        color=alt.Color('Scenario:N', title='Scenario'),
+        # Color: Scenario
+        color=alt.Color('Scenario:N', title='Temperature Scenario', sort=list(SCENARIO_MAP.keys())),
+        # Facet/Column: Detailed Time of Day
+        column=alt.Column('Detailed_Time_of_Day:N', title='Time of Day Period', 
+                          header=alt.Header(titleOrient="bottom", labelOrient="bottom", labelPadding=10), 
+                          sort=time_of_day_order),
         tooltip=[
+            'Detailed_Time_of_Day',
             'Scenario',
             alt.Tooltip(TARGET_COL, title='Demand (MW) Distribution', format=',.0f')
         ]
     ).properties(
-        title='Historical Demand Distribution by Temperature Scenario'
+        title='Historical Demand Distribution by Time of Day and Temperature Scenario'
+    ).configure_header(
+        titleFontSize=14,
+        labelFontSize=12
     ).interactive()
     
     st.altair_chart(chart, use_container_width=True)
-    st.markdown("_Box plots show the median (middle line), the interquartile range (box), and min/max range (whiskers) of historical demand for each scenario._")
+    st.markdown("_This faceted box plot visualizes how the distribution of energy demand shifts by **Temperature Scenario** within each **Detailed Time of Day** period._")
 
 
 def create_demand_plot(df_plot):
@@ -184,7 +208,7 @@ def create_demand_plot(df_plot):
 def main():
     st.set_page_config(layout="wide", page_title="Energy Demand Scenario Visualizer")
     st.title("☀️ Dutch Neighborhood Energy Demand Scenario Visualizer")
-    st.markdown("A focused view on predicted demand for a fixed temperature scenario.")
+    st.markdown("A focused view on predicted demand and historical context for fixed temperature scenarios.")
 
     data = load_data()
     model = load_model()
@@ -342,8 +366,8 @@ def main():
         st.markdown("Use the controls on the left to change the scenario and date range.")
         
     with col_boxplot:
-        st.subheader("Historical Demand Context (Box Plot)")
-        create_historical_boxplot()
+        st.subheader("Historical Demand Context (Faceted Box Plot)")
+        create_historical_boxplot() # Calls the new faceted box plot
 
     st.markdown("---")
     
