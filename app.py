@@ -86,7 +86,82 @@ def load_historical_data():
     
     return df
 
-# --- PLOTTING FUNCTION ---
+# --- PLOTTING FUNCTIONS ---
+
+@st.cache_data
+def create_comparison_plot(df):
+    """
+    Generates a bar chart showing Median Demand for every Time of Day / Scenario 
+    combination, with critical scenarios highlighted.
+    """
+    
+    # 1. Aggregate the data: Median Demand for each combination
+    df_agg = df.groupby(['Detailed_Time_of_Day', 'Scenario'])[TARGET_COL].median().reset_index()
+    df_agg = df_agg.rename(columns={TARGET_COL: 'Median_Demand_MW'})
+    
+    # --- HIGHLIGHTING LOGIC ---
+    def get_highlight_group(row):
+        scenario = row['Scenario']
+        time = row['Detailed_Time_of_Day']
+        
+        # Highlight Warm/Summer Evening spikes (User's request)
+        if time == 'Evening' and ('Warm' in scenario or 'Summer' in scenario):
+            return '🔥 Critical Summer/Warm Evening Spike'
+        # Highlight Cold/Mild Morning spikes (Initial observation)
+        elif time == 'Morning' and ('Cold' in scenario or 'Mild' in scenario):
+            return '🚨 Critical Winter/Mild Morning Spike'
+        else:
+            return 'Baseline Scenario'
+
+    df_agg['Highlight_Group'] = df_agg.apply(get_highlight_group, axis=1)
+    
+    # Define colors for the highlight groups
+    highlight_color_scale = alt.Scale(
+        domain=['🔥 Critical Summer/Warm Evening Spike', '🚨 Critical Winter/Mild Morning Spike', 'Baseline Scenario'],
+        range=['#FF4B4B', '#FF8C00', '#ADD8E6'] # Red, Orange, Light Blue
+    )
+    # ---------------------------
+
+    # Sort the Time of Day and Scenario for consistent plotting order
+    time_order = ['Midnight', 'Morning', 'Noon', 'Evening']
+    scenario_order = list(SCENARIO_MAP.keys())
+    
+    # 2. Create the Faceted Bar Chart
+    chart = alt.Chart(df_agg).mark_bar().encode(
+        # X: Scenario
+        x=alt.X('Scenario:N', title='Temperature Scenario', sort=scenario_order, axis=alt.Axis(labels=False)),
+        
+        # Y: Median Demand
+        y=alt.Y('Median_Demand_MW:Q', title='Median Historical Demand (MW)', scale=alt.Scale(zero=False)),
+        
+        # Color: Use the new Highlight Group
+        color=alt.Color('Highlight_Group:N', title='Scenario Peak Focus', scale=highlight_color_scale),
+        
+        # Column: Time of Day (Faceting)
+        column=alt.Column('Detailed_Time_of_Day:N', 
+                         header=alt.Header(titleOrient="bottom", labelOrient="bottom"), 
+                         sort=time_order, 
+                         title="Time of Day Period"),
+                         
+        # Tooltip for details
+        tooltip=[
+            'Detailed_Time_of_Day:N', 
+            'Scenario:N', 
+            alt.Tooltip('Median_Demand_MW:Q', title='Median Demand', format=',.0f'),
+            'Highlight_Group:N'
+        ]
+    ).properties(
+        title='Median Demand Spikes Across Time of Day and Scenario (Critical Periods Highlighted)'
+    ).interactive()
+    
+    st.altair_chart(chart, use_container_width=True)
+    st.markdown(
+        """
+        _This visual enhancement clearly highlights the **Warm/Summer Evening** demand spike 
+        (**🔥 Red**) and the **Cold/Mild Morning** spike (**🚨 Orange**), which are critical inputs for your energy shortage prediction model._
+        """
+    )
+
 
 @st.cache_data
 def create_filtered_boxplot(df, selected_time_of_day):
@@ -112,14 +187,14 @@ def create_filtered_boxplot(df, selected_time_of_day):
     ).interactive()
     
     st.altair_chart(chart, use_container_width=True)
-    st.markdown(f"**Visualization Details:** The box plot shows how the distribution of energy demand shifts across temperature scenarios specifically during the **{selected_time_of_day}** period.")
+    st.markdown(f"**Visualization Details:** The box plot shows the granular distribution (quartiles, outliers) of energy demand shifts across temperature scenarios specifically during the **{selected_time_of_day}** period.")
 
 # --- STREAMLIT APP LAYOUT ---
 
 def main():
     st.set_page_config(layout="wide", page_title="Historical Demand Scenario Visualizer")
     st.title("📊 Historical Energy Demand Scenario Visualizer")
-    st.markdown("Use the controls on the left to analyze how demand changes by temperature scenario during key times of the day based on your custom time periods.")
+    st.markdown("This dashboard provides the granular historical context necessary for your **early prediction of energy shortages in Dutch neighborhoods**.")
 
     df_historical = load_historical_data()
     
@@ -128,33 +203,38 @@ def main():
         return
 
     # ----------------------------------------------------------------------
+    # --- COMPARISON PLOT (Summary of Spikes) ---
+    # ----------------------------------------------------------------------
+    st.subheader("1. Summary of Demand Spikes (Median Demand)")
+    create_comparison_plot(df_historical)
+    
+    st.markdown("---")
+    
+    # ----------------------------------------------------------------------
     # --- INTERACTIVE INPUTS: TIME OF DAY SELECTION ---
     # ----------------------------------------------------------------------
     st.sidebar.header("Interactive Filter")
     
-    # 1. Time of Day Selection (Replaces Scenario Selection)
+    # 1. Time of Day Selection
     selected_time_of_day = st.sidebar.selectbox(
         "Select Time of Day Period:",
         options=TIME_OF_DAY_OPTIONS,
         index=TIME_OF_DAY_OPTIONS.index('Noon'), # Default to Noon
-        help="Select a specific time period to see how demand is distributed across the different temperature scenarios during that time."
+        help="Select a specific time period to see the detailed demand distribution across the four temperature scenarios."
     )
     
-    st.sidebar.info(f"Using Custom Period: **{selected_time_of_day}**")
+    st.sidebar.info(f"Viewing detailed distribution for: **{selected_time_of_day}**")
 
     st.markdown("---")
     
     # ----------------------------------------------------------------------
-    # --- DASHBOARD PLOT (The only visualization) ---
+    # --- DETAILED BOX PLOT ---
     # ----------------------------------------------------------------------
     
-    st.subheader(f"Demand Distribution by Temperature Scenario during the {selected_time_of_day} Period")
+    st.subheader(f"2. Detailed Demand Distribution by Scenario (Filtered to: {selected_time_of_day} Period)")
     
     # Call the filtered plot function
     create_filtered_boxplot(df_historical, selected_time_of_day)
-
-    st.markdown("---")
-    st.markdown(f"This focused dashboard provides the granular historical context needed for your project on **early prediction of energy shortages** in Dutch neighborhoods, clearly showing the interplay between temperature and your **custom time-of-day periods**.")
 
 
 # Execute the main function
