@@ -85,6 +85,7 @@ def load_model():
         return None
 
 # Loads raw data without caching, specifically for the temperature lookup
+@st.cache_data
 def load_raw_data(path):
     """Load the raw data for temperature lookup without caching/feature engineering."""
     try:
@@ -121,7 +122,147 @@ def load_data(path):
         st.error(f"Error loading or preprocessing data: {e}")
         return None
 
-# --- 3. STREAMLIT APP CORE ---
+# --- 3. CORE PREDICTION FUNCTION (MOVED AND CACHED) ---
+
+# Function to run the heavy recursive forecast
+def generate_forecast_results(historical_df, model, forecast_start_dt, forecast_end_dt, forecast_days):
+    """Handles the full recursive prediction loop and data preparation."""
+    
+    # Constants from global scope
+    # Note: These values rely on the global scope being set up correctly before calling this function.
+    EXPECTED_FEATURES = model.feature_name_
+    LAG_COLS = [f'{TARGET_COL_SANITIZED}_lag24', f'{TARGET_COL_SANITIZED}_lag48', f'{TARGET_COL_SANITIZED}_roll72']
+    PREDICTION_COL_NAME = 'Predicted_Demand_MW'
+    FORECAST_BEGIN_DT = pd.to_datetime('2025-07-01 00:00:00')
+
+    # --- Prepare Future Data (Requires the full historical data again for exogenous lookups) ---
+    df_raw = load_raw_data('cleaned_energy_weather_data(1).csv') 
+    if df_raw is None: return None
+
+    df_raw.set_index(DATE_COL, inplace=True)
+    df_raw.index = pd.to_datetime(df_raw.index)
+    df_full_temp = df_raw.copy()
+
+    # --- Recreate 2024 Climatology Forecast for ALL Exogenous Variables ---
+    START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'
+    END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'
+    dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')
+    
+    EXOGENOUS_COLS_RAW = [col for col in df_full_temp.columns if col != TARGET_COL and col not in CATEGORICAL_COLS and col != DATE_COL]
+    
+    temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, EXOGENOUS_COLS_RAW].copy()
+
+    if len(temp_history_climatology) != len(dates_2025_forecast_index):
+        st.error("Climatology data length mismatch. Cannot proceed.") 
+        return None
+    
+    future_exog_climatology_df = pd.DataFrame(
+        temp_history_climatology.values, 
+        index=dates_2025_forecast_index, 
+        columns=temp_history_climatology.columns
+    )
+    future_exog_climatology_df[TARGET_COL] = np.nan 
+
+    # --- Add Categorical Placeholders ---
+    for col in CATEGORICAL_COLS:
+        if col == 'Time_of_Day':
+            future_exog_climatology_df[col] = np.where(future_exog_climatology_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
+        elif col == 'Detailed_Time_of_Day':
+            future_exog_climatology_df[col] = future_exog_climatology_df.index.hour.map(lambda h: 
+                'Morning' if h in range(5, 12) else 
+                'Noon' if h in range(12, 17) else 
+                'Evening' if h in range(17, 22) else 
+                'Night'
+            ).fillna('Night') 
+        elif col == 'MeasureItem':
+            future_exog_climatology_df[col] = 'Monthly Hourly Load Values'
+        elif col == 'CountryCode':
+            future_exog_climatology_df[col] = 'NL'
+        elif col in ['CreateDate', 'UpdateDate']:
+            future_exog_climatology_df[col] = '03-03-2025 12:24:13' 
+
+    future_exog_df_encoded = pd.get_dummies(future_exog_climatology_df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
+    future_exog_df_encoded = create_features(future_exog_df_encoded.copy())
+    
+    # --- Combine and Final Alignment ---
+
+    df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df_encoded], axis=0)
+    df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
+
+    idx_full_forecast = pd.date_range(start=FORECAST_BEGIN_DT, end=forecast_end_dt, freq='h')
+    df_temp = df_combined.loc[idx_full_forecast].copy()
+
+    future_df = pd.DataFrame(0, index=idx_full_forecast, columns=EXPECTED_FEATURES)
+
+    for col in df_temp.columns:
+        if col in future_df.columns:
+            future_df[col] = df_temp[col]
+
+    for col in EXPECTED_FEATURES:
+        if col in future_df.columns:
+            future_df[col] = pd.to_numeric(future_df[col], errors='coerce').astype(float)
+            
+    # --- Recursive Prediction Loop ---
+
+    last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
+    s_predictions = pd.Series(index=idx_full_forecast, dtype=float)
+    
+    # Use st.info instead of st.write inside the loop (faster)
+    st.info(f"Calculating full recursive path from **{FORECAST_BEGIN_DT}** to **{forecast_end_dt}**...") 
+
+    # IMPORTANT: Removed st.write from inside the loop to speed up rendering
+    for i, current_index in enumerate(idx_full_forecast):
+        X_current = future_df.loc[[current_index]].copy()
+        s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
+
+        # --- ROBUST LAG CALCULATION ---
+        X_current.at[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
+        X_current.at[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
+        
+        roll72_window_end = current_index - pd.Timedelta(hours=24)
+        roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
+        
+        if s_latest.loc[roll72_window_start:roll72_window_end].empty:
+            roll72_val = np.nan
+        else:
+            roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
+            
+        X_current.at[current_index, LAG_COLS[2]] = roll72_val
+        # ------------------------------
+
+        if not np.isnan(X_current.at[current_index, LAG_COLS[2]]):
+            prediction = model.predict(X_current[EXPECTED_FEATURES])[0]
+        else:
+            prediction = np.nan
+
+        s_predictions.loc[current_index] = prediction
+
+    # --- Finalize and Filter Results ---
+    future_df[PREDICTION_COL_NAME] = s_predictions
+    
+    df_display_window = future_df.loc[forecast_start_dt:forecast_end_dt].copy()
+    df_plot = df_display_window.dropna(subset=[PREDICTION_COL_NAME]) 
+    
+    # Calculate 90th percentile threshold
+    shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.90) 
+
+    if df_plot.empty:
+        st.error(f"Cannot display results. Please ensure your start date is at least 72 hours after {FORECAST_BEGIN_DT.date()}.")
+        return None
+
+    # Return all necessary results
+    return {
+        'df_plot': df_plot,
+        'shortage_threshold': shortage_threshold,
+        'PREDICTION_COL_NAME': PREDICTION_COL_NAME,
+        'EXPECTED_FEATURES': EXPECTED_FEATURES,
+        'forecast_start_dt': forecast_start_dt,
+        'forecast_end_dt': forecast_end_dt,
+        'forecast_days': forecast_days
+    }
+
+
+# --- 4. STREAMLIT APP CORE ---
 
 st.set_page_config(
     page_title="Dutch Energy Demand Forecast",
@@ -131,6 +272,12 @@ st.set_page_config(
 
 st.title("💡 Early Energy Shortage Prediction Dashboard")
 st.markdown("Forecasting hourly energy demand in Dutch neighborhoods using LightGBM.")
+
+# Initialize session state for caching results
+if 'forecast_data' not in st.session_state:
+    st.session_state.forecast_data = None
+if 'last_run_params' not in st.session_state:
+    st.session_state.last_run_params = {}
 
 # --- Load Data and Model ---
 historical_df = load_data('cleaned_energy_weather_data(1).csv')
@@ -151,208 +298,79 @@ if historical_df is not None and model is not None:
         "Forecast Start Date (Day After Last Actual Data)",
         value=datetime(2025, 7, 1).date(), 
         min_value=datetime(2025, 7, 1).date(),
-        max_value=max_forecast_date.date()
+        max_value=max_forecast_date.date(),
+        key='forecast_date_input'
     )
 
     # Convert date input to the required datetime object for indexing
     forecast_start_dt = pd.to_datetime(forecast_start_date_input).floor('D')
 
-    # User selects the forecast horizon
-    forecast_days = st.sidebar.slider("Forecast Horizon (Days)", min_value=1, max_value=60, value=7)
+    # User selects the forecast horizon (REDUCED MAX from 60 to 30 for faster runtimes)
+    forecast_days = st.sidebar.slider("Forecast Horizon (Days)", min_value=1, max_value=30, value=7, key='forecast_days_slider')
 
     # Calculate the full forecast end date (hourly data)
     forecast_end_dt = forecast_start_dt + pd.Timedelta(days=forecast_days) - pd.Timedelta(hours=1)
     
-    # Define the fixed, true start of the forecast period (end of historical data)
-    FORECAST_BEGIN_DT = pd.to_datetime('2025-07-01 00:00:00')
-
     st.sidebar.markdown("---")
 
+    # Define current parameters for caching check
+    current_params = {
+        'start_dt': forecast_start_dt,
+        'days': forecast_days
+    }
+    
     # --- Prediction Button ---
+    # The button triggers the computation and updates session state
     if st.sidebar.button("Run Forecast", type="primary"):
-
         with st.spinner(f"Running recursive forecast for {forecast_days} days..."):
-
-            # --- Prepare Future Data (Requires the full historical data again for exogenous lookups) ---
-            df_raw = load_raw_data('cleaned_energy_weather_data(1).csv') 
-            if df_raw is None: st.stop()
-
-            # Now process the raw data for the temperature lookup
-            df_raw.set_index(DATE_COL, inplace=True)
-            df_raw.index = pd.to_datetime(df_raw.index)
-            df_full_temp = df_raw.copy()
-
-            # --- Recreate 2024 Climatology Forecast for ALL Exogenous Variables ---
-            START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'
-            END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'
-            dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')
-            
-            # Get all columns needed for future features that are not the target
-            EXOGENOUS_COLS_RAW = [col for col in df_full_temp.columns if col != TARGET_COL and col not in CATEGORICAL_COLS and col != DATE_COL]
-            
-            # Extract climatology for ALL exogenous columns
-            temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, EXOGENOUS_COLS_RAW].copy()
-
-            if len(temp_history_climatology) != len(dates_2025_forecast_index):
-                st.error("Climatology data length mismatch. Cannot proceed. Check data consistency for 2024-07 to 2024-12.") 
-                st.stop()
-            
-            # Create future exogenous dataframe (climatology)
-            future_exog_climatology_df = pd.DataFrame(
-                temp_history_climatology.values, 
-                index=dates_2025_forecast_index, 
-                columns=temp_history_climatology.columns
-            )
-            future_exog_climatology_df[TARGET_COL] = np.nan # Add target column placeholder
-
-            # --- Add Categorical Placeholders ---
-            for col in CATEGORICAL_COLS:
-                if col == 'Time_of_Day':
-                    future_exog_climatology_df[col] = np.where(future_exog_climatology_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
-                elif col == 'Detailed_Time_of_Day':
-                    future_exog_climatology_df[col] = future_exog_climatology_df.index.hour.map(lambda h: 
-                        'Morning' if h in range(5, 12) else 
-                        'Noon' if h in range(12, 17) else 
-                        'Evening' if h in range(17, 22) else 
-                        'Night'
-                    ).fillna('Night') 
-                elif col == 'MeasureItem':
-                    future_exog_climatology_df[col] = 'Monthly Hourly Load Values'
-                elif col == 'CountryCode':
-                    future_exog_climatology_df[col] = 'NL'
-                elif col in ['CreateDate', 'UpdateDate']:
-                    future_exog_climatology_df[col] = '03-03-2025 12:24:13' 
-
-            # 1e. One-hot encode the future data
-            future_exog_df_encoded = pd.get_dummies(future_exog_climatology_df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
-            
-            # Apply feature engineering (time features and temperature lags)
-            future_exog_df_encoded = create_features(future_exog_df_encoded.copy())
-            
-            # --- Combine and Final Alignment ---
-
-            # Combine historical (actual demand) and future exogenous data
-            df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df_encoded], axis=0)
-            df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
-
-            # Select the full index from the end of historical data up to the user's requested end date
-            idx_full_forecast = pd.date_range(start=FORECAST_BEGIN_DT, end=forecast_end_dt, freq='h')
-            df_temp = df_combined.loc[idx_full_forecast].copy()
-
-            # CRITICAL FIX 1: Align feature set to the model's expected features
-            # Initialize future_df with the full feature set (including the lag columns)
-            future_df = pd.DataFrame(0, index=idx_full_forecast, columns=EXPECTED_FEATURES)
-
-            # Copy over all common features (exogenous and time-based features)
-            for col in df_temp.columns:
-                if col in future_df.columns:
-                    future_df[col] = df_temp[col]
-
-            # CRITICAL FIX 2: Ensure all EXPECTED_FEATURES are explicitly converted to float
-            for col in EXPECTED_FEATURES:
-                if col in future_df.columns:
-                    future_df[col] = pd.to_numeric(future_df[col], errors='coerce').astype(float)
-            
-            # The lag columns (which are in EXPECTED_FEATURES) are currently NaN/zero, which is fine
-            # as they will be calculated recursively inside the loop.
-
-            # --- Recursive Prediction Loop (Simplified for Streamlit) ---
-
-            PREDICTION_COL_NAME = 'Predicted_Demand_MW'
-            
-            # Need last 72 hours of actual data for initial roll72 calculation
-            # Use the actual historical data (which has the lags already calculated and dropped NaNs)
-            last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
-
-            # Initialize prediction series (will be populated during loop)
-            s_predictions = pd.Series(index=idx_full_forecast, dtype=float)
-            
-            st.write(f"Calculating full recursive path from **{FORECAST_BEGIN_DT}** to **{forecast_end_dt}**...")
-
-            for i, current_index in enumerate(idx_full_forecast):
-
-                # 1. Prepare the row for the current timestamp (using the aligned future_df)
-                X_current = future_df.loc[[current_index]].copy()
-
-                # 2. Combine all known/predicted values for lag calculation
-                s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
-
-                # --- ROBUST LAG CALCULATION ---
-                # Update the lag features directly in the current row (X_current)
-                X_current.at[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
-                X_current.at[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
-                
-                roll72_window_end = current_index - pd.Timedelta(hours=24)
-                roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
-                
-                # Check if we have enough data to calculate the 72-hour roll
-                if s_latest.loc[roll72_window_start:roll72_window_end].empty:
-                    roll72_val = np.nan
-                else:
-                    # Rolling mean calculation for the window *ending* at T-24
-                    roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
-                    
-                X_current.at[current_index, LAG_COLS[2]] = roll72_val
-                # ------------------------------
-
-                # 3. Predict the current time step
-                # CRITICAL FIX: Use .at accessor for robust single-value retrieval
-                if not np.isnan(X_current.at[current_index, LAG_COLS[2]]):
-                    # Select the features the model expects, which are guaranteed to exist and be float now
-                    prediction = model.predict(X_current[EXPECTED_FEATURES])[0]
-                else:
-                    # Retain the NaN value for the first 72 hours
-                    prediction = np.nan
-
-                # 4. Assign the prediction back into the series for the next step
-                s_predictions.loc[current_index] = prediction
-
-
-            # --- Display Forecast Results ---
-            future_df[PREDICTION_COL_NAME] = s_predictions
-            
-            # 1. Filter results to the user's chosen window (e.g., 2025-10-01 to 2025-10-05)
-            df_display_window = future_df.loc[forecast_start_dt:forecast_end_dt].copy()
-
-            # 2. Drop any remaining NaN predictions (usually just the first 72 hours of the full forecast)
-            df_plot = df_display_window.dropna(subset=[PREDICTION_COL_NAME]) 
-
-            # Safety check to prevent errors if the user selects a start date too early
-            if df_plot.empty:
-                st.error(f"Cannot display results for the selected window: **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}**. Please ensure your start date is at least 72 hours after **{FORECAST_BEGIN_DT.date()}**.")
-                st.stop()
-
-
-            st.success(f"Forecast Complete! Results for **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}** displayed below.")
-
-            # Shortage analysis (Simplified)
-            # CHANGED: Use the historical 90th percentile of the actual Demand_MW column
-            shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.90) 
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric(label="Peak Predicted Demand", value=f"{df_plot[PREDICTION_COL_NAME].max():,.2f} MW")
-            with col2:
-                # CHANGED: Updated the label to reflect the 90th percentile threshold
-                st.metric(label="Shortage Threshold (90th Percentile)", value=f"{shortage_threshold:,.2f} MW")
-
-            shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]
-
-            if not shortage_hours.empty:
-                st.warning(f"🚨 **HIGH DEMAND ALERT:** Predicted demand exceeds the 90th percentile threshold during **{len(shortage_hours)} hours** in the forecast period. This requires proactive planning.")
-                st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)
+            results = generate_forecast_results(historical_df, model, forecast_start_dt, forecast_end_dt, forecast_days)
+            if results:
+                st.session_state.forecast_data = results
+                st.session_state.last_run_params = current_params
+                st.success(f"Forecast Complete! Results for **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}** stored in cache.")
             else:
-                st.info("Predicted demand is below the 90th percentile threshold for high-stress events.")
+                st.error("Forecast failed to generate results.")
+    
+    # --- Display Forecast Results (ALWAYS runs if data is available in state) ---
+    if st.session_state.forecast_data:
+        
+        # Unpack results from session state
+        results = st.session_state.forecast_data
+        df_plot = results['df_plot']
+        shortage_threshold = results['shortage_threshold']
+        PREDICTION_COL_NAME = results['PREDICTION_COL_NAME']
+        EXPECTED_FEATURES = results['EXPECTED_FEATURES']
+        
+        # Use cached parameters for display headings
+        start_date = st.session_state.last_run_params['start_dt'].date()
+        end_date = (st.session_state.last_run_params['start_dt'] + pd.Timedelta(days=st.session_state.last_run_params['days']) - pd.Timedelta(hours=1)).date()
+
+        st.subheader(f"Forecast Results ({start_date} to {end_date})")
+
+        # Shortage analysis (Uses 90th percentile)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(label="Peak Predicted Demand", value=f"{df_plot[PREDICTION_COL_NAME].max():,.2f} MW")
+        with col2:
+            st.metric(label="Shortage Threshold (90th Percentile)", value=f"{shortage_threshold:,.2f} MW")
+
+        shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]
+
+        if not shortage_hours.empty:
+            st.warning(f"🚨 **HIGH DEMAND ALERT:** Predicted demand exceeds the 90th percentile threshold during **{len(shortage_hours)} hours** in the forecast period. This requires proactive planning.")
+            st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)
+        else:
+            st.info("Predicted demand is below the 90th percentile threshold for high-stress events.")
 
 
-            # Plotting the forecast
-            st.subheader("Hourly Demand Forecast")
-            st.line_chart(df_plot, y=PREDICTION_COL_NAME)
+        # Plotting the forecast
+        st.subheader("Hourly Demand Forecast")
+        st.line_chart(df_plot, y=PREDICTION_COL_NAME)
 
-            st.subheader("Raw Data Preview")
-            st.dataframe(df_plot[[PREDICTION_COL_NAME] + [f for f in EXPECTED_FEATURES if f in df_plot.columns]].head(10), use_container_width=True)
+        st.subheader("Raw Data Preview")
+        st.dataframe(df_plot[[PREDICTION_COL_NAME] + [f for f in EXPECTED_FEATURES if f in df_plot.columns]].head(10), use_container_width=True)
 
-    # --- 4. Historical Demand Variance Analysis (New Section) ---
+    # --- 5. Historical Demand Variance Analysis (New Section) ---
     st.subheader("📊 Historical Demand Variance by Time of Day and Temperature")
     st.markdown("Analyze how the historical average energy demand (MW) changes throughout the day under different temperature conditions.")
 
