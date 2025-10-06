@@ -309,40 +309,49 @@ def main():
     # Risk calculation
     if peak_demand > CAPACITY_THRESHOLD:
         risk_level = "CRITICAL"
-        risk_color = "red"
-        delta = f"↑ {peak_demand - CAPACITY_THRESHOLD:,.2f} MW above Capacity"
+        risk_color = "red" # Stored for non-Streamlit use
+        delta_val = peak_demand - CAPACITY_THRESHOLD
+        delta = f"↑ {delta_val:,.2f} MW above Capacity"
     elif peak_demand > shortage_threshold:
         risk_level = "HIGH"
-        risk_color = "orange"
-        delta = f"↑ {peak_demand - shortage_threshold:,.2f} MW above 99th Pctl"
+        risk_color = "orange" # Stored for non-Streamlit use
+        delta_val = peak_demand - shortage_threshold
+        delta = f"↑ {delta_val:,.2f} MW above 99th Pctl"
     else:
         risk_level = "LOW"
-        risk_color = "green"
-        delta = f"↓ {shortage_threshold - peak_demand:,.2f} MW below 99th Pctl"
+        risk_color = "green" # Stored for non-Streamlit use
+        delta_val = shortage_threshold - peak_demand
+        delta = f"↓ {delta_val:,.2f} MW below 99th Pctl"
         
     
     col1, col2, col3 = st.columns(3)
+    
+    # FIX: Use 'normal', 'inverse', or 'off' for delta_color
     
     with col1:
         st.metric(
             label="Shortage Risk Score (24H)", 
             value=risk_level, 
             delta=f"Peak Time: {peak_time}",
-            delta_color=risk_color if risk_color in ["red", "orange"] else "normal"
+            # Delta is non-numeric here, so 'off' is clean.
+            delta_color="off" 
         )
     with col2:
         st.metric(
             label="Peak Predicted Demand (MW)", 
             value=f"{peak_demand:,.2f}", 
             delta=delta,
-            delta_color=risk_color
+            # 'normal' applies red for positive delta (high demand) and green for negative delta (low demand).
+            # This matches the risk logic.
+            delta_color="normal"
         )
     with col3:
         st.metric(
             label="Predicted Temperature at Peak (°C)", 
             value=f"{peak_temp:.1f}°C", 
             delta=f"Time: {peak_time}", 
-            delta_color="normal"
+            # Non-numeric delta, use 'off'.
+            delta_color="off"
         )
         
     st.markdown("---")
