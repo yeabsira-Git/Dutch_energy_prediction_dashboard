@@ -37,12 +37,12 @@ def get_temp_category(temp_c):
 def load_data_and_predict():
     """
     Loads data, engineers features, loads the model, and generates predictions.
-    Includes robust data loading to fix persistent parsing errors.
+    Includes robust data loading and feature checking to fix errors.
     """
     data_file_path = 'cleaned_energy_weather_data(1).csv' 
     model_file_path = MODEL_FILENAME
     
-    # 1. Load Data with Robust Delimiter/Encoding Checks (The FIX)
+    # 1. Load Data with Robust Delimiter/Encoding Checks
     df = None
     try:
         # Attempt 1: Standard CSV (comma) with UTF-8
@@ -56,7 +56,7 @@ def load_data_and_predict():
                 data_file_path, parse_dates=[DATE_COL], encoding='latin1', sep=';', skiprows=0, skip_blank_lines=True
             )
         except Exception as e:
-            st.error(f"FATAL DATA ERROR: Could not load data. Tried comma (UTF-8) and semicolon (Latin-1). Please verify your CSV file structure. (Error: {e})")
+            st.error(f"FATAL DATA ERROR: Could not load data. Tried comma (UTF-8) and semicolon (Latin-1). (Error: {e})")
             st.stop()
     except Exception as e:
          st.error(f"FATAL DATA ERROR: Unexpected error during data load: {e}")
@@ -69,10 +69,11 @@ def load_data_and_predict():
         st.error(f"FATAL MODEL ERROR: Could not load model '{MODEL_FILENAME}'. Ensure file exists. (Error: {e})")
         st.stop()
     
-    # 3. Feature Engineering (Must create ALL features the model expects)
+    # Ensure DateUTC is timezone-aware
     if df[DATE_COL].dt.tz is None:
         df[DATE_COL] = df[DATE_COL].dt.tz_localize('UTC')
-        
+    
+    # 3. Feature Engineering (Must create ALL features the model expects)
     df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10.0
     
     # Temporal Features
@@ -82,7 +83,7 @@ def load_data_and_predict():
     df['month'] = df[DATE_COL].dt.month
     df['quarter'] = df[DATE_COL].dt.quarter
     
-    # Lag and Rolling Features (Assumed features needed by the model)
+    # Lag and Rolling Features
     df['Demand_MW_lag24'] = df[ORIGINAL_TARGET_COL].shift(24)
     df['Demand_MW_lag48'] = df[ORIGINAL_TARGET_COL].shift(48)
     df['Demand_MW_roll72'] = df[ORIGINAL_TARGET_COL].shift(1).rolling(window=72).mean()
@@ -90,11 +91,20 @@ def load_data_and_predict():
     df['temp_roll72'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=72).mean()
     df['temp_roll168'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=168).mean()
     
-    # Fill NaNs for weather columns needed for prediction
+    # Ensure numerical columns used by model have no NaNs (imputation)
     model_features = model.feature_name_
+    for feature in model_features:
+        if feature in df.columns and df[feature].dtype in ['float64', 'int64']:
+            df[feature] = df[feature].fillna(df[feature].mean())
     
-    # 4. Filter for rows where prediction is possible
-    # Drop rows where any of the required model features (including lags) are NaN
+    # 4. CRITICAL FIX FOR KEYERROR: Check for missing features before dropna/prediction
+    missing_cols = [f for f in model_features if f not in df.columns]
+    if missing_cols:
+        # If the model expects features that are not in the DataFrame, raise a detailed error
+        st.error(f"FATAL FEATURE ERROR: The LightGBM model requires columns that are missing from the data. Missing features: {', '.join(missing_cols)}")
+        st.stop()
+
+    # Drop NaNs that resulted from creating the lag/roll features, ensuring all model features are present
     df_predict = df.copy().dropna(subset=model_features, how='any')
 
     # 5. Predict (Strictly enforce feature order - FIX for LightGBMError)
@@ -110,7 +120,7 @@ def load_data_and_predict():
 
     return df
 
-# --- VISUALIZATION FUNCTIONS ---
+# --- VISUALIZATION FUNCTIONS (Unchanged) ---
 
 def create_demand_forecast_plot(df: pd.DataFrame):
     """Creates the standard time-series demand and forecast plot (Demand vs Time)."""
@@ -195,7 +205,7 @@ def display_summary_kpis(df: pd.DataFrame):
         )
     st.markdown("---")
 
-# --- MAIN STREAMLIT APPLICATION ---
+# --- MAIN STREAMLIT APPLICATION (Unchanged) ---
 
 def main():
     st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Prototype")
