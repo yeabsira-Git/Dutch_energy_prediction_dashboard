@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -135,10 +134,8 @@ def create_dual_axis_forecast_hourly(df_plot, shortage_threshold_col):
     """Plots the main forecast with demand and temperature on dual axes, 
     using a dynamic hourly threshold column."""
     
-    # df_plot should already have the DATE_COL as a column from the main function
-    
     base = alt.Chart(df_plot).encode( 
-        x=alt.X(DATE_COL, title='Forecast Date (Jul 1 - Dec 31, 2025)')
+        x=alt.X(DATE_COL, title='Forecast Date')
     )
 
     demand_line = base.mark_line(color='#1f77b4').encode(
@@ -160,7 +157,7 @@ def create_dual_axis_forecast_hourly(df_plot, shortage_threshold_col):
     chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
         y='independent' 
     ).properties(
-        title='6-Month Forecast: Demand (Blue) & Dynamic Hourly Threshold (Red)'
+        title='Filtered Forecast: Demand (Blue) & Dynamic Hourly Threshold (Red)'
     )
     
     st.altair_chart(chart, use_container_width=True)
@@ -172,7 +169,9 @@ def create_time_of_day_variance_plot(data_hist, df_plot):
     avg_profile = data_hist.groupby('hour')[target_col_sanitized].mean().reset_index()
     avg_profile.columns = ['hour', 'Average_Demand']
     
-    forecast_profile = df_plot.reset_index(names=[DATE_COL])
+    # FIX: df_plot is already reset in main(), so we avoid the redundant reset_index().
+    forecast_profile = df_plot.rename(columns={DATE_COL: 'temp_date'}).copy()
+    
     forecast_profile = forecast_profile.groupby('hour')[PREDICTION_COL_NAME].mean().reset_index()
     forecast_profile.columns = ['hour', 'Predicted_Demand']
     
@@ -211,38 +210,58 @@ def main():
     target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
     temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
     
-    # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUT: CONTINUOUS SLIDER ---
-    # ----------------------------------------------------------------------
-    st.sidebar.header("6-Month Forecast Scenario (Jul 1 - Dec 31, 2025)")
-    
-    temp_forecast_celsius = st.sidebar.slider(
-        "Set Persistent Forecast Temperature (°C) for 6 Months:",
-        min_value=-15.0, 
-        max_value=35.0,
-        value=15.0, # Default to a mild temperature
-        step=0.5,
-        format='%.1f °C',
-        help="Simulate a constant temperature over the entire 6-month period (July-Dec) to observe the long-term predictive response."
-    )
-    
-    st.sidebar.info(f"The demand will be predicted based on a constant **{temp_forecast_celsius:.1f}°C** for the next 6 months.")
-    st.markdown("---")
-    
-    # --- GENERATE FUTURE DATA FOR PREDICTION (July 1, 2025 - Dec 31, 2025) ---
-    
+    # --- GENERATE FUTURE DATES (Jul 1 - Dec 31, 2025) ---
     future_start_date = data.index[-1] + pd.Timedelta(hours=1) 
     future_end_date = datetime(2025, 12, 31, 23, 0, 0, tzinfo=future_start_date.tzinfo)
     
     future_dates = pd.date_range(start=future_start_date, end=future_end_date, freq='H', name=DATE_COL)
     future_df = pd.DataFrame(index=future_dates)
     
-    # Create base time features
+    # Create base time features on the full 6-month period
     future_df = create_features(future_df)
-    
-    temp_0_1_degrees = int(temp_forecast_celsius * 10) 
 
-    # Set the two temperature columns
+    # ----------------------------------------------------------------------
+    # --- INTERACTIVE INPUTS: TEMPERATURE AND DATE RANGE SLIDERS ---
+    # ----------------------------------------------------------------------
+    st.sidebar.header("6-Month Forecast Scenario Controls")
+    
+    # 1. Temperature Slider (Hypothetical Scenario)
+    temp_forecast_celsius = st.sidebar.slider(
+        "1. Set Persistent Forecast Temperature (°C):",
+        min_value=-15.0, 
+        max_value=35.0,
+        value=15.0, 
+        step=0.5,
+        format='%.1f °C',
+        help="Simulate a constant temperature over the entire 6-month period (July-Dec)."
+    )
+    
+    # 2. Date Range Slider (Zoom Control)
+    full_date_range = future_df.index.normalize().unique()
+    
+    # Default to showing the last 30 days of the forecast
+    default_start = full_date_range[-30] 
+    default_end = full_date_range[-1]
+    
+    selected_date_range = st.sidebar.slider(
+        "2. Zoom Forecast Display Range:",
+        min_value=full_date_range.min().to_pydatetime(),
+        max_value=full_date_range.max().to_pydatetime(),
+        value=(default_start.to_pydatetime(), default_end.to_pydatetime()),
+        step=pd.Timedelta(days=1),
+        format="MMM DD",
+        help="Select the start and end date to zoom into the results (e.g., Q4 analysis)."
+    )
+    
+    # Convert selected dates back to pandas Timestamps (and normalize to start/end of day)
+    start_date_filter = pd.to_datetime(selected_date_range[0]).normalize()
+    end_date_filter = pd.to_datetime(selected_date_range[1]).normalize() + pd.Timedelta(hours=23)
+    
+    st.sidebar.info(f"Scenario Temperature: **{temp_forecast_celsius:.1f}°C**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
+    st.markdown("---")
+    
+    # Apply temperature settings to future_df
+    temp_0_1_degrees = int(temp_forecast_celsius * 10) 
     future_df[temp_col_sanitized] = temp_0_1_degrees 
     future_df[TEMP_CELSIUS_COL] = temp_forecast_celsius
     
@@ -296,7 +315,7 @@ def main():
     lag_features = lag_df.columns.difference(lag_cols)
     future_df = future_df.join(lag_df[lag_features].tail(len(future_df)))
     
-    # --- 3. Final Prediction ---
+    # --- 3. Final Prediction (Full 6-Months) ---
     
     future_df = future_df.fillna(future_df.median())
     model_features = expected_model_features
@@ -307,33 +326,35 @@ def main():
     
     st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
-    # ----------------------------------------------------------------------
-    # FIX: Calculate HOURLY 99th Percentile Shortage Threshold
-    # ----------------------------------------------------------------------
-    
-    # Calculate the 99th percentile demand for each hour of the day (0-23)
+    # Calculate HOURLY 99th Percentile Shortage Threshold
     hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
     hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
     
-    # Merge the hourly threshold into the forecast DataFrame
-    df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
-    df_plot = df_plot.reset_index(names=[DATE_COL]) 
-    df_plot = df_plot.merge(hourly_threshold_df, on='hour', how='left')
+    # Prepare the full 6-month prediction DataFrame
+    df_full_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
+    df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
+    df_full_plot = df_full_plot.merge(hourly_threshold_df, on='hour', how='left')
     
-    # The shortage threshold is now a dynamic column in df_plot
-    shortage_threshold_series = df_plot['Shortage_Threshold_MW']
+    # Filter the DataFrame based on the Date Slider selection
+    df_plot = df_full_plot[
+        (df_full_plot[DATE_COL] >= start_date_filter) & 
+        (df_full_plot[DATE_COL] <= end_date_filter)
+    ]
     
-    # Use the max of this threshold for display purposes
+    # --- RISK ANALYSIS using the FILTERED (displayed) data ---
+    
     max_shortage_threshold = hourly_threshold_df['Shortage_Threshold_MW'].max()
 
-    # Analysis based on the 6-month prediction
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
     
+    if df_plot.empty:
+         st.error("No data points in the selected date range. Please widen your date selection.")
+         return
+         
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
     
-    # Risk calculation now compares predicted demand to the dynamic hourly threshold
     shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot['Shortage_Threshold_MW']]
     
     if peak_demand > CAPACITY_THRESHOLD:
@@ -354,7 +375,7 @@ def main():
     
     with col1:
         st.metric(
-            label="Shortage Risk Score (6-Month Forecast)", 
+            label="Shortage Risk Score (Filtered View)", 
             value=risk_level, 
             delta=f"Hours above 99th Pctl: {len(shortage_hours)}",
             delta_color="off" 
@@ -380,8 +401,7 @@ def main():
     
     st.subheader("2. Explainable Forecast Drivers")
     
-    st.markdown("#### 2.1. Long-Term Forecast: Demand vs. Temperature")
-    # Call the new hourly plotting function
+    st.markdown("#### 2.1. Filtered Forecast: Demand vs. Dynamic Hourly Threshold")
     create_dual_axis_forecast_hourly(df_plot, 'Shortage_Threshold_MW')
 
     
@@ -389,10 +409,12 @@ def main():
     
     with colA:
         st.markdown("#### 2.2. Historical U-Curve Validation")
+        # Use filtered data for peak highlight, but historical data for curve
         create_u_curve_plot(data, df_plot)
         
     with colB:
         st.markdown("#### 2.3. Hourly Profile Variance")
+        # Use filtered data for predicted profile, historical data for average
         create_time_of_day_variance_plot(data, df_plot)
 
 
