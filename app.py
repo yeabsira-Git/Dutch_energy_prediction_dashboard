@@ -10,42 +10,35 @@ from sklearn.metrics import mean_squared_error
 import warnings
 warnings.filterwarnings("ignore")
 
-# --- CONFIGURATION (Must match training script) ---
+# --- CONFIGURATION ---
 DATE_COL = 'DateUTC'
 TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)'
-TEMP_CELSIUS_COL = 'Temperature_C' # New column for plots
+TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Example capacity (in MW). Adjust this based on your network's actual limit.
-
-# List of categorical columns identified from the model's expected features
+CAPACITY_THRESHOLD = 15000 
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
 # --- 1. UTILITY FUNCTIONS ---
 
-# Helper function to sanitize names
 def sanitize_feature_names(columns):
     new_cols = []
     for col in columns:
         col = str(col)
-        # Remove special characters and replace with underscore
         col = re.sub(r'[^A-Za-z0-9_]+', '_', col)
         col = re.sub(r'^_+|_+$', '', col)
         col = re.sub(r'_{2,}', '_', col)
         new_cols.append(col)
     return new_cols
 
-# Feature Engineering Function
 @st.cache_data
 def create_features(df):
     
-    # FIX for KeyError: Only set the index if the date column exists (used for CSV data loading)
     if DATE_COL in df.columns:
         df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
         df = df.set_index(DATE_COL)
         
-    # 1. Temporal Features (Crucial for Time-of-Day Analysis)
     df['hour'] = df.index.hour
     df['dayofweek'] = df.index.dayofweek
     df['dayofyear'] = df.index.dayofyear
@@ -55,13 +48,16 @@ def create_features(df):
     df['year'] = df.index.year
     df['quarter'] = df.index.quarter
     
-    # 2. Temperature Conversion 
+    # Adding two simple features often used in time-series
+    df['time_index'] = np.arange(len(df)) + 1 
+    df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
+
     if TEMP_COL in df.columns:
         df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
     
-    # 3. Lag Features (Used only for historical data initially)
     if TARGET_COL in df.columns:
-        df['lag_24'] = df[TARGET_COL].shift(24)
+        # Simple lag 24 for use in historical data
+        df['lag_24'] = df[TARGET_COL].shift(24) 
     
     return df
 
@@ -72,10 +68,13 @@ def load_data():
     data = pd.read_csv('cleaned_energy_weather_data(1).csv')
     data = create_features(data)
     
-    # Sanitize columns immediately after feature creation
+    # Perform One-Hot Encoding on the historical data
+    data = pd.get_dummies(data, columns=CATEGORICAL_COLS, drop_first=False)
+    
+    # Sanitize all columns (including new OHE ones)
     data.columns = sanitize_feature_names(data.columns)
     
-    # Fill missing lag values with the last available historical value
+    # Forward fill (ffill) weather/lag data if any NaNs remain
     data = data.ffill()
     return data
 
@@ -88,33 +87,27 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- 3. PLOTTING FUNCTIONS ---
+# --- 3. PLOTTING FUNCTIONS (No changes needed here) ---
 
 def create_u_curve_plot(data_hist, df_plot):
-    """Plots the historical Demand vs Temperature (U-Curve) and highlights the peak prediction."""
-    
     target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
     pred_col = PREDICTION_COL_NAME
     
     data_hist = data_hist.rename(columns={target_col_sanitized: 'Demand_MW'})
     df_plot = df_plot.rename(columns={pred_col: 'Predicted_Demand'})
     
-    # Calculate the average demand for each temperature bin
     temp_bins = pd.cut(data_hist[TEMP_CELSIUS_COL], bins=np.arange(-20, 45, 1), include_lowest=True)
     temp_demand = data_hist.groupby(temp_bins)['Demand_MW'].mean().reset_index()
     temp_demand[TEMP_CELSIUS_COL] = temp_demand[temp_bins.name].apply(lambda x: x.mid)
 
-    # Find the predicted peak demand and its associated temperature
     peak_pred = df_plot.loc[df_plot['Predicted_Demand'].idxmax()]
     
-    # Create the Altair chart
     chart_hist = alt.Chart(temp_demand).mark_line(point=True).encode(
         x=alt.X(TEMP_CELSIUS_COL, title='Temperature (°C)'),
         y=alt.Y('Demand_MW', title='Avg. Demand (MW)'),
         tooltip=[alt.Tooltip(TEMP_CELSIUS_COL, title="Temp"), alt.Tooltip('Demand_MW', title="Avg. Demand")]
     ).properties(title='Historical U-Curve: Demand vs. Temperature')
 
-    # Add a layer for the predicted peak point
     chart_peak = alt.Chart(pd.DataFrame({
         TEMP_CELSIUS_COL: [peak_pred[TEMP_CELSIUS_COL]],
         'Predicted_Demand': [peak_pred['Predicted_Demand']]
@@ -130,8 +123,6 @@ def create_u_curve_plot(data_hist, df_plot):
     st.altair_chart(chart_hist + chart_peak, use_container_width=True)
 
 def create_dual_axis_forecast(df_plot, shortage_threshold):
-    """Plots the main forecast with demand and temperature on dual axes."""
-    
     base = alt.Chart(df_plot.reset_index()).encode(
         x=alt.X(DATE_COL, title='Forecast Hour')
     )
@@ -160,34 +151,26 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
     st.altair_chart(chart, use_container_width=True)
 
 def create_time_of_day_variance_plot(data_hist, df_plot):
-    """Compares the predicted hourly demand profile against the historical average profile."""
-    
     target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
     
-    # 1. Calculate Historical Average Profile
     avg_profile = data_hist.groupby('hour')[target_col_sanitized].mean().reset_index()
     avg_profile.columns = ['hour', 'Average_Demand']
     
-    # 2. Extract Forecast Profile
     forecast_profile = df_plot.reset_index()
     forecast_profile = forecast_profile.groupby('hour')[PREDICTION_COL_NAME].mean().reset_index()
     forecast_profile.columns = ['hour', 'Predicted_Demand']
     
-    # 3. Merge for Plotting
     plot_df = pd.merge(avg_profile, forecast_profile, on='hour', how='inner')
     
-    # 4. Create Altair chart
     chart = alt.Chart(plot_df).encode(
         x=alt.X('hour', title='Hour of Day (0-23)', scale=alt.Scale(domain=[0, 23]))
     )
     
-    # Average line
     avg_line = chart.mark_line(color='grey', strokeDash=[3, 3]).encode(
         y=alt.Y('Average_Demand', title='Demand (MW)'),
         tooltip=['hour', 'Average_Demand']
     )
     
-    # Predicted line
     pred_line = chart.mark_line(color='green').encode(
         y=alt.Y('Predicted_Demand', title='Demand (MW)'),
         tooltip=['hour', 'Predicted_Demand']
@@ -203,137 +186,76 @@ def main():
     st.title("⚡ Dutch Neighborhood Energy Shortage Predictor")
     st.markdown("---")
 
+    # Load data and model
     data = load_data()
     model = load_model()
     
     if model is None:
         return
     
-    # Sanitize column names for use after loading
     target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
     temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
-
-    # --- SIMULATE NEXT 24-HOUR FORECAST ---
     
-    # Get the last 24 hours of actual data
-    last_actuals = data[target_col_sanitized].tail(24)
-    
-    # --- SIMULATE FUTURE DATA FOR PREDICTION (Mocking future weather) ---
+    # --- SIMULATE FUTURE DATA FOR PREDICTION (24 hours) ---
     future_start_date = data.index[-1] + pd.Timedelta(hours=1)
     future_dates = pd.date_range(start=future_start_date, periods=24, freq='H', name=DATE_COL)
     future_df = pd.DataFrame(index=future_dates)
     
-    # Create temporal features for the future data
+    # Create base features
     future_df = create_features(future_df)
     
     # Mocking Temperature (Cold Snap Example)
     temp_shift = (future_df.index.hour - 6) * (2 * np.pi / 24)
-    temp_forecast = (np.cos(temp_shift) * 30) + 20 # Sinusoidal temp swing
+    temp_forecast = (np.cos(temp_shift) * 30) + 20 
+    
+    # Set the two temperature columns
     future_df[temp_col_sanitized] = (temp_forecast * 10).astype(int) 
     future_df[TEMP_CELSIUS_COL] = future_df[temp_col_sanitized] / 10 
     
-    # Fill in required categorical columns
-    for col in CATEGORICAL_COLS:
-        col_sanitized = sanitize_feature_names([col])[0]
-        if col_sanitized in data.columns:
-            mode_val = data[col_sanitized].mode()[0]
-            future_df[col_sanitized] = mode_val 
-
-    # --- FEATURE VALIDATION AND PREPARATION (Crucial for LightGBM Fix) ---
+    # --- FEATURE ENGINEERING FIX: 
+    # 1. Combine historical and future data to calculate lag/rolling features correctly
+    # 2. Add all missing OHE and base features (Imputation)
     
+    # Get the last historical value for imputation
+    last_hist = data.tail(1)
+    
+    # Get the list of all features the model expects
     expected_model_features = list(model.feature_name_)
     
-    # 1. Ensure the 'lag_24' feature is correctly populated
-    # We use the last 24 actual values for the first 24 future lags.
-    # This aligns the past 24 actual demands with the future 24 forecast hours.
-    future_df['lag_24'] = last_actuals.values[:len(future_df)]
+    # --- 1. Impute Base and One-Hot Encoded (OHE) Features ---
+    for col in expected_model_features:
+        if col not in future_df.columns:
+            # Check if it's an OHE feature or a base feature we need to impute
+            if any(cat in col for cat in ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']):
+                # OHE feature: Default to 0, or 1 if it matches the current scenario's mode
+                # For simplicity, we assume the mode is the expected value (e.g., CountryCode_NL=1)
+                if col in last_hist.columns and last_hist[col].iloc[0] == 1:
+                    future_df[col] = 1
+                else:
+                    future_df[col] = 0
+            elif col in last_hist.columns:
+                # Base features (weather/metadata) that were not generated by create_features: impute with last historical value
+                future_df[col] = last_hist[col].iloc[0]
+            elif col == 'index':
+                # 'index' is likely the pandas index used as a feature, which is a common LightGBM training artifact
+                future_df[col] = np.arange(len(data), len(data) + len(future_df)) + 1
+            else:
+                # Fallback for unexpected missing features
+                future_df[col] = 0 
     
-    # 2. Final check: Ensure all expected features are present
-    missing_features = [col for col in expected_model_features if col not in future_df.columns]
+    # --- 2. Calculate Advanced Lag/Rolling Features ---
     
-    if missing_features:
-        st.error(f"FATAL ERROR: The model is missing required features in the forecast data: {missing_features}. Cannot predict.")
-        return # Stop execution if features are missing
+    # Create combined DataFrame containing historical and future temperature/target for lag calculations
+    lag_cols = [target_col_sanitized, temp_col_sanitized]
     
-    # 3. Select the final feature set for prediction
-    model_features = expected_model_features
+    # Ensure 'data' has the target column for lag calculation (needed for target_col_sanitized)
+    lag_df = pd.concat([data[lag_cols], future_df[lag_cols]]) 
+    
+    # 2.1. Advanced Demand Features
+    lag_df['Demand_MW_lag24'] = lag_df[target_col_sanitized].shift(24)
+    lag_df['Demand_MW_lag48'] = lag_df[target_col_sanitized].shift(48)
+    lag_df['Demand_MW_roll72'] = lag_df[target_col_sanitized].shift(1).rolling(72).mean()
 
-    # --- RUN PREDICTION ---
-    future_df[PREDICTION_COL_NAME] = model.predict(future_df[model_features])
-
-    # --- DASHBOARD LAYOUT AND METRICS ---
-    
-    st.subheader("1. Core Risk Metrics & Shortage Analysis")
-    
-    shortage_threshold = data[target_col_sanitized].quantile(0.99)
-    
-    df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
-    peak_demand = df_plot[PREDICTION_COL_NAME].max()
-    
-    peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
-    peak_time = peak_row.name.strftime('%H:%M')
-    peak_temp = peak_row[TEMP_CELSIUS_COL]
-    
-    # Determine the status and delta for the main risk score
-    if peak_demand > CAPACITY_THRESHOLD:
-        risk_level = "CRITICAL"
-        risk_color = "red"
-        delta = f"↑ {peak_demand - CAPACITY_THRESHOLD:,.2f} MW above Capacity"
-    elif peak_demand > shortage_threshold:
-        risk_level = "HIGH"
-        risk_color = "orange"
-        delta = f"↑ {peak_demand - shortage_threshold:,.2f} MW above 99th Pctl"
-    else:
-        risk_level = "LOW"
-        risk_color = "green"
-        delta = f"↓ {shortage_threshold - peak_demand:,.2f} MW below 99th Pctl"
-        
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="Shortage Risk Score (24H)", 
-            value=risk_level, 
-            delta=f"Peak Time: {peak_time}",
-            delta_color=risk_color if risk_color in ["red", "orange"] else "normal"
-        )
-    with col2:
-        st.metric(
-            label="Peak Predicted Demand (MW)", 
-            value=f"{peak_demand:,.2f}", 
-            delta=delta,
-            delta_color=risk_color
-        )
-    with col3:
-        st.metric(
-            label="Predicted Temperature at Peak (°C)", 
-            value=f"{peak_temp:.1f}°C", 
-            delta=f"Time: {peak_time}", 
-            delta_color="normal"
-        )
-        
-    st.markdown("---")
-    
-    # --- DASHBOARD REFINEMENT: EXPLAINABLE PLOTS ---
-    
-    st.subheader("2. Explainable Forecast Drivers")
-    
-    st.markdown("#### 2.1. Dual-Axis Forecast: Demand vs. Temperature")
-    create_dual_axis_forecast(df_plot, shortage_threshold)
-
-    
-    colA, colB = st.columns(2)
-    
-    with colA:
-        st.markdown("#### 2.2. Historical U-Curve Validation")
-        create_u_curve_plot(data, df_plot)
-        
-    with colB:
-        st.markdown("#### 2.3. Hourly Profile Variance")
-        create_time_of_day_variance_plot(data, df_plot)
-
-
-# Execute the main function
-if __name__ == "__main__":
-    main()
+    # 2.2. Advanced Temperature Features
+    lag_df['temp_lag24'] = lag_df[temp_col_sanitized].shift(24)
+    lag_df['temp_roll
