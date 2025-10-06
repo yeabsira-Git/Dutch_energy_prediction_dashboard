@@ -423,17 +423,18 @@ def main():
         is_critical_time = True
 
 
-    # --- SIMPLIFIED RELATIVE RISK LOGIC (LOW/HIGH DEMAND ONLY) ---
+    # --- REVISED RELATIVE RISK LOGIC (HIGH DEMAND / DYNAMIC SPIKE / LOW DEMAND) ---
     
-    # 1. HIGH DEMAND (Absolute Statistical High or Dynamic Spike)
+    # 1. HIGH DEMAND (Absolute Statistical High - Reserved for 99th Pctl breaches)
     if peak_demand > GLOBAL_RISK_THRESHOLD:
         risk_level = "HIGH DEMAND"
         delta_val = peak_demand - GLOBAL_RISK_THRESHOLD
         delta = f"↑ {delta_val:,.2f} MW **above Global 99th Pctl!** (Absolute High)"
-        delta_color = "inverse"
+        delta_color = "inverse" # Red/High Danger
         
+    # 2. DYNAMIC SPIKE (Short-term surge - This is the requested change)
     elif peak_above_dynamic:
-        risk_level = "HIGH DEMAND"
+        risk_level = "DYNAMIC SPIKE" # <--- CHANGED
         delta_val = peak_demand - dynamic_trigger_value
         
         if is_critical_time:
@@ -442,14 +443,14 @@ def main():
         else:
             delta = f"↑ {delta_val:,.2f} MW **above MA (General Spike)**"
             
-        delta_color = "normal"
+        delta_color = "normal" # Orange/Warning
     
-    # 2. LOW DEMAND (Routine Conditions)
+    # 3. LOW DEMAND (Routine Conditions)
     else:
         risk_level = "LOW DEMAND"
         margin_below_dynamic = dynamic_trigger_value - peak_demand if dynamic_trigger_value > peak_demand else 0 
         delta = f"Peak is ↓ {margin_below_dynamic:,.2f} MW **below Dynamic Alert Threshold**"
-        delta_color = "off" 
+        delta_color = "off" # Grey/Low Alert
         
     
     col1, col2, col3 = st.columns(3)
