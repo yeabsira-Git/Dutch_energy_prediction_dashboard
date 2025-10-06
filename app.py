@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -28,6 +27,20 @@ SCENARIO_MAP = {
     "3. Warm (20°C - 25°C)": 22.5,   
     "4. Summer (> 25°C)": 30.0      
 }
+
+# --- TIME PERIOD MAPPING (NEW) ---
+def map_hour_to_period(hour):
+    """Maps the hour (0-23) to a Time of Day category."""
+    if 0 <= hour <= 5:
+        return 'Midnight (00:00 - 05:59)'
+    elif 6 <= hour <= 11:
+        return 'Morning (06:00 - 11:59)'
+    elif 12 <= hour <= 16:
+        return 'Noon (12:00 - 16:59)'
+    elif 17 <= hour <= 23:
+        return 'Evening (17:00 - 23:59)'
+    return 'Other'
+
 
 # --- 1. UTILITY FUNCTIONS ---
 
@@ -103,11 +116,15 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- 3. PLOTTING FUNCTIONS (Only Demand Risk Plot remains) ---
+# --- 3. PLOTTING FUNCTIONS ---
 
 def create_demand_risk_plot(df_plot, shortage_threshold_col):
     """Plots Demand, Threshold, and highlights shortage hours for clarity."""
     
+    if df_plot.empty:
+        st.info("No data available for the selected time range and/or time periods.")
+        return
+        
     # Calculate a boolean column for shortage
     df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
     
@@ -117,7 +134,8 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
             DATE_COL, 
             alt.Tooltip(PREDICTION_COL_NAME, title="Demand (MW)", format=',.2f'),
             alt.Tooltip(shortage_threshold_col, title="99th Pctl (MW)", format=',.2f'),
-            alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)")
+            alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)"),
+            alt.Tooltip('Time_Period', title="Time Period") # NEW TOOLTIP
         ]
     )
     
@@ -174,7 +192,7 @@ def main():
     # ----------------------------------------------------------------------
     # --- INTERACTIVE INPUTS: SCENARIO SELECTION AND CALENDAR INPUT ---
     # ----------------------------------------------------------------------
-    st.sidebar.header("6-Month Forecast Scenario Controls")
+    st.sidebar.header("Forecast Scenario Controls")
     
     # 1. Temperature Scenario Selection
     selected_scenario = st.sidebar.selectbox(
@@ -210,6 +228,24 @@ def main():
         st.error("Please select both a start and end date from the calendar.")
         return
 
+    # 3. Time of Day Filter (New)
+    st.sidebar.markdown("---")
+    st.sidebar.header("Display Filtering")
+    
+    TIME_PERIODS = [
+        'Evening (17:00 - 23:59)',
+        'Morning (06:00 - 11:59)',
+        'Noon (12:00 - 16:59)',
+        'Midnight (00:00 - 05:59)',
+    ]
+
+    selected_periods = st.sidebar.multiselect(
+        "3. Filter by Time of Day:",
+        options=TIME_PERIODS,
+        default=TIME_PERIODS, # Default to showing all
+        help="Filter the main graph to focus on peak or off-peak hours."
+    )
+    
     st.markdown("---")
     
     # Apply temperature settings to future_df
@@ -221,7 +257,7 @@ def main():
     future_df[target_col_sanitized] = np.nan
     
     # ----------------------------------------------------------------------
-    # --- FEATURE ENGINEERING (Lag/Rolling) ---
+    # --- FEATURE ENGINEERING & PREDICTION (Full 6-Months) ---
     # ----------------------------------------------------------------------
     
     last_hist = data.tail(1)
@@ -287,10 +323,14 @@ def main():
     df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
     df_full_plot = df_full_plot.merge(hourly_threshold_df, on='hour', how='left')
     
-    # Filter the DataFrame based on the Date Calendar selection
+    # Add Time_Period column for filtering (NEW)
+    df_full_plot['Time_Period'] = df_full_plot['hour'].apply(map_hour_to_period)
+    
+    # Filter the DataFrame based on the Date Calendar and NEW Time of Day selection
     df_plot = df_full_plot[
         (df_full_plot[DATE_COL] >= start_date_filter) & 
-        (df_full_plot[DATE_COL] <= end_date_filter)
+        (df_full_plot[DATE_COL] <= end_date_filter) &
+        (df_full_plot['Time_Period'].isin(selected_periods)) # Apply Time of Day filter
     ].copy()
     
     # --- RISK ANALYSIS using the FILTERED (displayed) data ---
@@ -298,7 +338,7 @@ def main():
     max_shortage_threshold = hourly_threshold_df['Shortage_Threshold_MW'].max()
 
     if df_plot.empty:
-         st.error("No data points in the selected date range. Please widen your date selection.")
+         st.error("No data points for the selected date range and time periods. Please adjust your filters.")
          return
          
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
