@@ -17,6 +17,7 @@ MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 
 # List of categorical columns identified from the model's expected features
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
+TARGET_COL_SANITIZED = 'Demand_MW' # Hardcoded as sanitize_feature_names(['Demand_MW']) will be 'Demand_MW'
 
 # --- 1. UTILITY FUNCTIONS (Copied from Training Script) ---
 
@@ -137,9 +138,8 @@ model = load_model()
 
 if historical_df is not None and model is not None:
     # Get the last actual demand data for lag calculation
-    TARGET_COL_SANITIZED = sanitize_feature_names([TARGET_COL])[0]
-    last_actuals = historical_df[TARGET_COL_SANITIZED]
     EXPECTED_FEATURES = model.feature_name_
+    LAG_COLS = [f'{TARGET_COL_SANITIZED}_lag24', f'{TARGET_COL_SANITIZED}_lag48', f'{TARGET_COL_SANITIZED}_roll72']
 
     # --- Sidebar Configuration ---
     st.sidebar.header("Prediction Settings")
@@ -237,31 +237,28 @@ if historical_df is not None and model is not None:
             df_temp = df_combined.loc[idx_forecast].copy()
 
             # CRITICAL FIX 1: Align feature set to the model's expected features
+            # Initialize future_df with the full feature set (including the lag columns)
             future_df = pd.DataFrame(0, index=df_temp.index, columns=EXPECTED_FEATURES)
 
+            # Copy over all common features (exogenous and time-based features)
             for col in df_temp.columns:
                 if col in future_df.columns:
                     future_df[col] = df_temp[col]
 
             # CRITICAL FIX 2: Ensure all EXPECTED_FEATURES are explicitly converted to float
-            # This solves the 'object' dtype error for the model input
             for col in EXPECTED_FEATURES:
                 if col in future_df.columns:
-                    # pd.to_numeric coerces non-numeric values (like 'object' type) to numeric.
-                    # 'coerce' turns any non-convertible value (like NaT in date-based columns) into NaN, 
-                    # and then we cast the whole thing to float.
                     future_df[col] = pd.to_numeric(future_df[col], errors='coerce').astype(float)
             
-            # Add target lag columns back, they are not part of the model's base features
-            future_df[f'{TARGET_COL_SANITIZED}_lag24'] = np.nan
-            future_df[f'{TARGET_COL_SANITIZED}_lag48'] = np.nan
-            future_df[f'{TARGET_COL_SANITIZED}_roll72'] = np.nan
+            # The lag columns (which are in EXPECTED_FEATURES) are currently NaN/zero, which is fine
+            # as they will be calculated recursively inside the loop.
 
             # --- Recursive Prediction Loop (Simplified for Streamlit) ---
 
             PREDICTION_COL_NAME = 'Predicted_Demand_MW'
             
             # Need last 72 hours of actual data for initial roll72 calculation
+            # Use the actual historical data (which has the lags already calculated and dropped NaNs)
             last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
 
             # Initialize prediction series (will be populated during loop)
@@ -278,23 +275,30 @@ if historical_df is not None and model is not None:
                 s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
 
                 # --- ROBUST LAG CALCULATION ---
-                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag24'] = s_latest.get(current_index - pd.Timedelta(hours=24))
-                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_lag48'] = s_latest.get(current_index - pd.Timedelta(hours=48))
+                # Update the lag features directly in the current row (X_current)
+                X_current.loc[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
+                X_current.loc[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
                 
                 roll72_window_end = current_index - pd.Timedelta(hours=24)
                 roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
-                roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
-                X_current.loc[current_index, f'{TARGET_COL_SANITIZED}_roll72'] = roll72_val
+                
+                # Check if we have enough data to calculate the 72-hour roll
+                if s_latest.loc[roll72_window_start:roll72_window_end].empty:
+                    roll72_val = np.nan
+                else:
+                    # Rolling mean calculation for the window *ending* at T-24
+                    roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
+                    
+                X_current.loc[current_index, LAG_COLS[2]] = roll72_val
                 # ------------------------------
 
                 # 3. Predict the current time step
-                # We select the features the model expects, which are guaranteed to exist and be float now
-                X_current_features = X_current[EXPECTED_FEATURES].copy()
-
-                # CRITICAL CHECK: Only predict after the first 72 hours (when target lags are available)
-                if i >= 72:
-                    prediction = model.predict(X_current_features)[0]
+                # CRITICAL CHECK: Only predict when target lags are available (i.e., roll72_val is not NaN)
+                if not np.isnan(X_current.loc[current_index, LAG_COLS[2]].iloc[0]):
+                    # Select the features the model expects, which are guaranteed to exist and be float now
+                    prediction = model.predict(X_current[EXPECTED_FEATURES])[0]
                 else:
+                    # Retain the NaN value for the first 72 hours
                     prediction = np.nan
 
                 # 4. Assign the prediction back into the series for the next step
@@ -309,7 +313,7 @@ if historical_df is not None and model is not None:
             st.success("Forecast Complete! Results displayed below.")
 
             # Shortage analysis (Simplified)
-            shortage_threshold = last_actuals.quantile(0.99)
+            shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.99) # Use the historical 99th percentile
 
             col1, col2 = st.columns(2)
             with col1:
