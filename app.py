@@ -258,7 +258,7 @@ def main():
             future_df[col_sanitized] = data[col_sanitized].mode()[0] 
 
     # Select features for prediction (must match model's expected features)
-    model_features = [col for col col in model.feature_name_ if col in future_df.columns]
+    model_features = [col for col  in model.feature_name_ if col in future_df.columns]
     
     # --- RUN PREDICTION ---
     
