@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,7 +18,7 @@ TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Example capacity (in MW). ADJUST THIS TO YOUR NETWORK'S CAPACITY!
+CAPACITY_THRESHOLD = 15000 # Example hard limit (in MW). ADJUST THIS TO YOUR NETWORK'S CAPACITY!
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
 # --- 1. UTILITY FUNCTIONS ---
@@ -38,7 +39,6 @@ def create_features(df):
     """Creates basic time and temperature features."""
     
     if DATE_COL in df.columns:
-        # Ensure the date column is present for setting the index
         if DATE_COL not in df.index.names:
              df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
              df = df.set_index(DATE_COL)
@@ -109,7 +109,6 @@ def create_u_curve_plot(data_hist, df_plot):
     temp_demand = data_hist.groupby(temp_bins)['Demand_MW'].mean().reset_index()
     temp_demand[TEMP_CELSIUS_COL] = temp_demand[temp_bins.name].apply(lambda x: x.mid)
 
-    # Use the median of the forecast temperature for a single point on the U-Curve
     peak_pred = df_plot.loc[df_plot['Predicted_Demand'].idxmax()]
     
     chart_hist = alt.Chart(temp_demand).mark_line(point=True).encode(
@@ -132,12 +131,13 @@ def create_u_curve_plot(data_hist, df_plot):
     
     st.altair_chart(chart_hist + chart_peak, use_container_width=True)
 
-def create_dual_axis_forecast(df_plot, shortage_threshold):
-    """Plots the main forecast with demand and temperature on dual axes."""
+def create_dual_axis_forecast_hourly(df_plot, shortage_threshold_col):
+    """Plots the main forecast with demand and temperature on dual axes, 
+    using a dynamic hourly threshold column."""
     
-    df_plot = df_plot.reset_index().rename(columns={'index': DATE_COL})
-
-    base = alt.Chart(df_plot).encode(
+    # df_plot should already have the DATE_COL as a column from the main function
+    
+    base = alt.Chart(df_plot).encode( 
         x=alt.X(DATE_COL, title='Forecast Date (Jul 1 - Dec 31, 2025)')
     )
 
@@ -146,15 +146,10 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
         tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Demand")]
     )
 
-    # Create a separate, small DataFrame for the threshold line tooltip
-    threshold_df = pd.DataFrame({
-        'Threshold_Y': [shortage_threshold],
-        'Tooltip_Label': [f'Shortage Threshold ({shortage_threshold:,.0f} MW)']
-    })
-
-    threshold_line = alt.Chart(threshold_df).mark_rule(color='red', strokeDash=[5, 5]).encode(
-        y=alt.Y('Threshold_Y:Q', title='Demand (MW)'),
-        tooltip=[alt.Tooltip('Tooltip_Label:N', title='Threshold')] 
+    # Threshold line is drawn from the dynamic hourly column
+    threshold_line = base.mark_line(color='red', strokeDash=[5, 5]).encode(
+        y=alt.Y(shortage_threshold_col, title='Demand (MW)'),
+        tooltip=[alt.Tooltip(shortage_threshold_col, title='Hourly 99th Pctl')] 
     )
 
     temp_line = base.mark_line(color='#ff7f0e').encode(
@@ -165,7 +160,7 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
     chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
         y='independent' 
     ).properties(
-        title='6-Month Forecast: Demand (Blue) & Temperature (Orange)'
+        title='6-Month Forecast: Demand (Blue) & Dynamic Hourly Threshold (Red)'
     )
     
     st.altair_chart(chart, use_container_width=True)
@@ -177,7 +172,7 @@ def create_time_of_day_variance_plot(data_hist, df_plot):
     avg_profile = data_hist.groupby('hour')[target_col_sanitized].mean().reset_index()
     avg_profile.columns = ['hour', 'Average_Demand']
     
-    forecast_profile = df_plot.reset_index()
+    forecast_profile = df_plot.reset_index(names=[DATE_COL])
     forecast_profile = forecast_profile.groupby('hour')[PREDICTION_COL_NAME].mean().reset_index()
     forecast_profile.columns = ['hour', 'Predicted_Demand']
     
@@ -236,27 +231,22 @@ def main():
     
     # --- GENERATE FUTURE DATA FOR PREDICTION (July 1, 2025 - Dec 31, 2025) ---
     
-    # Start date is the hour after the last historical entry (e.g., 2025-06-30 22:00:00)
     future_start_date = data.index[-1] + pd.Timedelta(hours=1) 
-    # End date is the end of the year, as requested (2025-12-31 23:00:00)
     future_end_date = datetime(2025, 12, 31, 23, 0, 0, tzinfo=future_start_date.tzinfo)
     
-    # Generate dates for the entire forecast period 
     future_dates = pd.date_range(start=future_start_date, end=future_end_date, freq='H', name=DATE_COL)
     future_df = pd.DataFrame(index=future_dates)
     
     # Create base time features
     future_df = create_features(future_df)
     
-    # Apply the interactive temperature input to the entire 6-month period
-    # Corrected type conversion: float to int (0.1 degrees Celsius format)
     temp_0_1_degrees = int(temp_forecast_celsius * 10) 
 
     # Set the two temperature columns
     future_df[temp_col_sanitized] = temp_0_1_degrees 
     future_df[TEMP_CELSIUS_COL] = temp_forecast_celsius
     
-    # FIX: Initialize the Target Column (needed for lag/rolling concat)
+    # Initialize the Target Column (needed for lag/rolling concat)
     future_df[target_col_sanitized] = np.nan
     
     # ----------------------------------------------------------------------
@@ -279,13 +269,11 @@ def main():
                 continue
             
             if any(cat in col for cat in ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']):
-                # Impute OHE features by taking the last known state from historical data
                 if col in last_hist.columns and last_hist[col].iloc[0] == 1:
                     future_df[col] = 1
                 else:
                     future_df[col] = 0
             elif col in last_hist.columns:
-                # Impute static features with the last known value
                 future_df[col] = last_hist[col].iloc[0]
             elif col == 'index':
                 future_df[col] = np.arange(len(data), len(data) + len(future_df)) + 1
@@ -295,15 +283,12 @@ def main():
     # --- 2. Calculate Advanced Lag/Rolling Features ---
     
     lag_cols = [target_col_sanitized, temp_col_sanitized]
-    # Concatenate historical data with the future DataFrame (which has NaN for the target)
     lag_df = pd.concat([data[lag_cols], future_df[lag_cols]]) 
     
-    # 2.1. Advanced Demand Features (will use historical data for the first few days of lag)
     lag_df['Demand_MW_lag24'] = lag_df[target_col_sanitized].shift(24)
     lag_df['Demand_MW_lag48'] = lag_df[target_col_sanitized].shift(48)
     lag_df['Demand_MW_roll72'] = lag_df[target_col_sanitized].shift(1).rolling(72).mean()
 
-    # 2.2. Advanced Temperature Features
     lag_df['temp_lag24'] = lag_df[temp_col_sanitized].shift(24)
     lag_df['temp_roll72'] = lag_df[temp_col_sanitized].shift(1).rolling(72).mean()
     lag_df['temp_roll168'] = lag_df[temp_col_sanitized].shift(1).rolling(168).mean()
@@ -313,7 +298,6 @@ def main():
     
     # --- 3. Final Prediction ---
     
-    # Fill any remaining NaNs (primarily the first few hours of lag features)
     future_df = future_df.fillna(future_df.median())
     model_features = expected_model_features
 
@@ -323,30 +307,47 @@ def main():
     
     st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
-    shortage_threshold = data[target_col_sanitized].quantile(0.99)
+    # ----------------------------------------------------------------------
+    # FIX: Calculate HOURLY 99th Percentile Shortage Threshold
+    # ----------------------------------------------------------------------
     
+    # Calculate the 99th percentile demand for each hour of the day (0-23)
+    hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
+    hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
+    
+    # Merge the hourly threshold into the forecast DataFrame
     df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
+    df_plot = df_plot.reset_index(names=[DATE_COL]) 
+    df_plot = df_plot.merge(hourly_threshold_df, on='hour', how='left')
     
+    # The shortage threshold is now a dynamic column in df_plot
+    shortage_threshold_series = df_plot['Shortage_Threshold_MW']
+    
+    # Use the max of this threshold for display purposes
+    max_shortage_threshold = hourly_threshold_df['Shortage_Threshold_MW'].max()
+
     # Analysis based on the 6-month prediction
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
     
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
-    peak_time_full = peak_row.name.strftime('%Y-%m-%d %H:%M')
+    peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
     
-    # Risk calculation
+    # Risk calculation now compares predicted demand to the dynamic hourly threshold
+    shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot['Shortage_Threshold_MW']]
+    
     if peak_demand > CAPACITY_THRESHOLD:
         risk_level = "CRITICAL"
         delta_val = peak_demand - CAPACITY_THRESHOLD
-        delta = f"↑ {delta_val:,.2f} MW above Capacity"
-    elif peak_demand > shortage_threshold:
+        delta = f"↑ {delta_val:,.2f} MW above Hard Capacity"
+    elif not shortage_hours.empty:
         risk_level = "HIGH"
-        delta_val = peak_demand - shortage_threshold
-        delta = f"↑ {delta_val:,.2f} MW above 99th Pctl"
+        max_shortage_delta = (shortage_hours[PREDICTION_COL_NAME] - shortage_hours['Shortage_Threshold_MW']).max()
+        delta = f"↑ {max_shortage_delta:,.2f} MW above Hourly 99th Pctl"
     else:
         risk_level = "LOW"
-        delta_val = shortage_threshold - peak_demand
-        delta = f"↓ {delta_val:,.2f} MW below 99th Pctl"
+        delta_val = max_shortage_threshold - peak_demand
+        delta = f"↓ {delta_val:,.2f} MW below Max 99th Pctl"
         
     
     col1, col2, col3 = st.columns(3)
@@ -355,7 +356,7 @@ def main():
         st.metric(
             label="Shortage Risk Score (6-Month Forecast)", 
             value=risk_level, 
-            delta=f"Peak Time: {peak_time_full}",
+            delta=f"Hours above 99th Pctl: {len(shortage_hours)}",
             delta_color="off" 
         )
     with col2:
@@ -380,7 +381,8 @@ def main():
     st.subheader("2. Explainable Forecast Drivers")
     
     st.markdown("#### 2.1. Long-Term Forecast: Demand vs. Temperature")
-    create_dual_axis_forecast(df_plot, shortage_threshold)
+    # Call the new hourly plotting function
+    create_dual_axis_forecast_hourly(df_plot, 'Shortage_Threshold_MW')
 
     
     colA, colB = st.columns(2)
