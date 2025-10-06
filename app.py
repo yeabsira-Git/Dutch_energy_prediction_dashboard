@@ -20,9 +20,14 @@ PREDICTION_COL_NAME = 'Predicted_Demand'
 CAPACITY_THRESHOLD = 15000 # Hard limit (in MW)
 
 # UPDATED THRESHOLD CONSTANTS
-OPERATIONAL_HIGH_THRESHOLD = 14250 # NEW: High Risk Operational threshold (95% of 15,000 MW)
-DYNAMIC_MAX_CAP = 13500 # NEW: If peak is above this, dynamic MA alert is ignored.
-MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average to filter noise
+OPERATIONAL_HIGH_THRESHOLD = 14250 # High Risk Operational threshold (95% of 15,000 MW)
+DYNAMIC_MAX_CAP = 13500 # If peak is above this, dynamic MA alert is ignored (for clean separation)
+MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average
+
+# NEW TIME-OF-DAY SPECIFIC THRESHOLDS
+TIME_OF_DAY_SENSITIVITY_THRESHOLD = 13800 # MW. Lower threshold for time-specific high risk.
+COLD_SCENARIO_CRITICAL_PERIOD = 'Morning (06:00 - 11:59)'
+SUMMER_SCENARIO_CRITICAL_PERIOD = 'Evening (17:00 - 23:59)'
 
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
@@ -34,9 +39,9 @@ SCENARIO_MAP = {
     "4. Summer (> 25°C)": 30.0      
 }
 
-# --- TIME PERIOD MAPPING (RESTORED VERBOSE NAMES) ---
+# --- TIME PERIOD MAPPING ---
 def map_hour_to_period(hour):
-    """Maps the hour (0-23) to a Time of Day category."""
+    """Maps the hour (0-23) to a Time of Day category based on the EDA definition."""
     if 0 <= hour <= 5:
         return 'Midnight (00:00 - 05:59)'
     elif 6 <= hour <= 11:
@@ -151,9 +156,11 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
         ]
     )
     
-    # 1. Prediction Line (Blue)
-    demand_line = base.mark_line(color='#1f77b4').encode(
+    # 1. Prediction Line (Color-coded by Time_Period)
+    demand_line = base.mark_line(point=True).encode(
         y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)'),
+        color=alt.Color('Time_Period', title='Time of Day Segment'),
+        strokeWidth=alt.value(2)
     )
     
     # 2. Global Risk Threshold Line (Red Dashed - STATISTICAL RISK)
@@ -190,7 +197,8 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
 
 def main():
     st.set_page_config(layout="wide", page_title="Energy Shortage Prediction Dashboard")
-    st.title("⚡ Dutch Neighborhood Energy Shortage Predictor")
+    # Acknowledging user's project context
+    st.title("⚡ Dutch Neighborhood Energy Shortage Predictor (Project Focus: Early Warning)")
     st.markdown("---")
 
     data = load_data()
@@ -379,6 +387,7 @@ def main():
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
+    peak_time_period = peak_row['Time_Period'] # Get the time period for the peak
     
     # Check if the peak is above the dynamic threshold
     peak_above_dynamic = peak_demand > peak_row['Dynamic_Alert_Threshold']
@@ -387,7 +396,21 @@ def main():
     # Shortage hours based on STATISTICAL threshold (only used for Hour count metric)
     shortage_hours_statistical = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot['Global_Risk_Threshold_MW']]
     
-    # NEW LOGIC: Hierarchical Operational Risk Status
+    # Determine if the peak is in a Time-of-Day Critical Period
+    is_time_critical = False
+    scenario_type = selected_scenario.split('(')[0].strip() # '1. Cold' -> '1. Cold'
+
+    if 'Cold' in scenario_type and peak_time_period == COLD_SCENARIO_CRITICAL_PERIOD:
+        is_time_critical = True
+        time_alert_reason = f"({COLD_SCENARIO_CRITICAL_PERIOD} peak for Cold Scenario)"
+    elif 'Summer' in scenario_type and peak_time_period == SUMMER_SCENARIO_CRITICAL_PERIOD:
+        is_time_critical = True
+        time_alert_reason = f"({SUMMER_SCENARIO_CRITICAL_PERIOD} peak for Summer Scenario)"
+    else:
+        time_alert_reason = ""
+
+
+    # NEW LOGIC: Hierarchical Operational Risk Status (with Time-Specific Sensitivity)
     
     # 1. CRITICAL (Absolute Capacity Breach)
     if peak_demand > CAPACITY_THRESHOLD:
@@ -396,11 +419,20 @@ def main():
         delta = f"↑ {delta_val:,.2f} MW **above Hard Capacity**"
         delta_color = "inverse"
     
-    # 2. HIGH DEMAND (Operational Proximity)
-    elif peak_demand > OPERATIONAL_HIGH_THRESHOLD:
+    # 2. HIGH DEMAND (Operational Proximity - Absolute OR Time-Specific)
+    elif peak_demand > OPERATIONAL_HIGH_THRESHOLD or \
+         (peak_demand > TIME_OF_DAY_SENSITIVITY_THRESHOLD and is_time_critical):
+        
         risk_level = "HIGH DEMAND"
         delta_val = CAPACITY_THRESHOLD - peak_demand
-        delta = f"Peak is ↓ {delta_val:,.2f} MW **to Hard Capacity**"
+        
+        if is_time_critical and peak_demand < OPERATIONAL_HIGH_THRESHOLD:
+            # High demand due to time-specific sensitivity, not absolute proximity
+            delta = f"Peak is ↓ {delta_val:,.2f} MW **to Hard Capacity** {time_alert_reason}"
+            # Slightly different delta to emphasize the time-specific trigger
+        else:
+            delta = f"Peak is ↓ {delta_val:,.2f} MW **to Hard Capacity**"
+            
         delta_color = "normal"
         
     # 3. DYNAMIC ALERT (Significant Spike in MILD conditions only)
@@ -432,7 +464,7 @@ def main():
             label="Peak Predicted Demand (MW)", 
             value=f"{peak_demand:,.2f}", 
             # Show how many hours exceeded the statistical threshold, providing statistical context
-            delta=f"Hours > Global 99th Pctl: {len(shortage_hours_statistical)}",
+            delta=f"Peak Time Period: {peak_time_period}",
             delta_color="off"
         )
     with col3:
@@ -445,15 +477,16 @@ def main():
     
     # Keep both threshold values displayed clearly
     st.markdown(f"**Operational Hard Capacity (CRITICAL Trigger):** **{CAPACITY_THRESHOLD:,.2f} MW** (Black Dotted Line on Plot)")
-    st.markdown(f"**Operational High Demand Trigger:** **{OPERATIONAL_HIGH_THRESHOLD:,.2f} MW**")
+    st.markdown(f"**Operational High Demand Trigger (Absolute):** **{OPERATIONAL_HIGH_THRESHOLD:,.2f} MW**")
+    st.markdown(f"**Time-of-Day Sensitive Trigger:** **{TIME_OF_DAY_SENSITIVITY_THRESHOLD:,.2f} MW** (Triggers HIGH DEMAND if the peak occurs in the critical period.)")
     st.markdown(f"**Dynamic Alert Trigger (MA + {MA_ALERT_BUFFER} MW):** **{dynamic_trigger_value:,.2f} MW** (Purple Dotted Line on Plot)")
-    st.markdown(f"*(Note: Dynamic Alert is ignored if peak is > {DYNAMIC_MAX_CAP:,.2f} MW)*") # New Note
+    st.markdown(f"*(Note: Dynamic Alert is ignored if peak is > {DYNAMIC_MAX_CAP:,.2f} MW)*")
     st.markdown(f"**Statistical High-Risk Threshold (Global 99th Percentile):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line on Plot)")
     st.markdown("---")
     
     # --- DASHBOARD PLOTS ---
     
-    st.subheader("2. Hourly Energy Demand Forecast and Shortage Risk")
+    st.subheader("2. Hourly Energy Demand Forecast and Shortage Risk (Color-Coded by Time of Day)")
     
     # Pass the Global 99th Pctl as the threshold for the plot
     create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW')
