@@ -37,7 +37,6 @@ def sanitize_feature_names(columns):
 def create_features(df):
     """Creates basic time and temperature features."""
     
-    # FIX for KeyError: Only set the index if the date column exists (used for CSV data loading)
     if DATE_COL in df.columns:
         df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
         df = df.set_index(DATE_COL)
@@ -60,7 +59,7 @@ def create_features(df):
     if TEMP_COL in df.columns:
         df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
     
-    # Simple lag 24 for historical data (will be ignored for future data)
+    # Simple lag 24 for historical data 
     if TARGET_COL in df.columns:
         df['lag_24'] = df[TARGET_COL].shift(24) 
     
@@ -132,6 +131,8 @@ def create_u_curve_plot(data_hist, df_plot):
 
 def create_dual_axis_forecast(df_plot, shortage_threshold):
     """Plots the main forecast with demand and temperature on dual axes."""
+    
+    # Base chart for Demand and Temperature lines
     base = alt.Chart(df_plot.reset_index()).encode(
         x=alt.X(DATE_COL, title='Forecast Hour')
     )
@@ -141,9 +142,16 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
         tooltip=[DATE_COL, alt.Tooltip(PREDICTION_COL_NAME, title="Demand")]
     )
 
-    threshold_line = base.mark_rule(color='red', strokeDash=[5, 5]).encode(
-        y=alt.YDatum(shortage_threshold),
-        tooltip=[alt.Tooltip(f'Shortage Threshold ({shortage_threshold:,.0f} MW)', title='Threshold')]
+    # FIX: Create a separate, small DataFrame for the threshold line to correctly define the tooltip data source.
+    threshold_df = pd.DataFrame({
+        'Threshold_Y': [shortage_threshold],
+        'Tooltip_Label': [f'Shortage Threshold ({shortage_threshold:,.0f} MW)']
+    })
+
+    threshold_line = alt.Chart(threshold_df).mark_rule(color='red', strokeDash=[5, 5]).encode(
+        y=alt.Y('Threshold_Y:Q', title='Demand (MW)'),
+        # Reference the 'Tooltip_Label' column (Nominal type) from the threshold_df
+        tooltip=[alt.Tooltip('Tooltip_Label:N', title='Threshold')] 
     )
 
     temp_line = base.mark_line(color='#ff7f0e').encode(
@@ -151,6 +159,7 @@ def create_dual_axis_forecast(df_plot, shortage_threshold):
         tooltip=[DATE_COL, alt.Tooltip(TEMP_CELSIUS_COL, title="Temp")]
     )
     
+    # Layer all three charts
     chart = alt.layer(demand_line, threshold_line, temp_line).resolve_scale(
         y='independent' 
     ).properties(
@@ -309,31 +318,25 @@ def main():
     # Risk calculation
     if peak_demand > CAPACITY_THRESHOLD:
         risk_level = "CRITICAL"
-        risk_color = "red" # Stored for non-Streamlit use
         delta_val = peak_demand - CAPACITY_THRESHOLD
         delta = f"↑ {delta_val:,.2f} MW above Capacity"
     elif peak_demand > shortage_threshold:
         risk_level = "HIGH"
-        risk_color = "orange" # Stored for non-Streamlit use
         delta_val = peak_demand - shortage_threshold
         delta = f"↑ {delta_val:,.2f} MW above 99th Pctl"
     else:
         risk_level = "LOW"
-        risk_color = "green" # Stored for non-Streamlit use
         delta_val = shortage_threshold - peak_demand
         delta = f"↓ {delta_val:,.2f} MW below 99th Pctl"
         
     
     col1, col2, col3 = st.columns(3)
     
-    # FIX: Use 'normal', 'inverse', or 'off' for delta_color
-    
     with col1:
         st.metric(
             label="Shortage Risk Score (24H)", 
             value=risk_level, 
             delta=f"Peak Time: {peak_time}",
-            # Delta is non-numeric here, so 'off' is clean.
             delta_color="off" 
         )
     with col2:
@@ -341,8 +344,6 @@ def main():
             label="Peak Predicted Demand (MW)", 
             value=f"{peak_demand:,.2f}", 
             delta=delta,
-            # 'normal' applies red for positive delta (high demand) and green for negative delta (low demand).
-            # This matches the risk logic.
             delta_color="normal"
         )
     with col3:
@@ -350,7 +351,6 @@ def main():
             label="Predicted Temperature at Peak (°C)", 
             value=f"{peak_temp:.1f}°C", 
             delta=f"Time: {peak_time}", 
-            # Non-numeric delta, use 'off'.
             delta_color="off"
         )
         
