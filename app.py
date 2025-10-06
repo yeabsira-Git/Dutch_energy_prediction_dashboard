@@ -19,9 +19,9 @@ MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
 CAPACITY_THRESHOLD = 15000 # Hard limit (in MW)
 
-# NEW THRESHOLD CONSTANTS
-OPERATIONAL_HIGH_THRESHOLD = 14500 # High Risk Operational threshold (96.7% of 15,000 MW)
-DYNAMIC_MAX_CAP = 14000 # NEW: If peak is above this, dynamic MA alert is ignored.
+# UPDATED THRESHOLD CONSTANTS
+OPERATIONAL_HIGH_THRESHOLD = 14250 # NEW: High Risk Operational threshold (95% of 15,000 MW)
+DYNAMIC_MAX_CAP = 13500 # NEW: If peak is above this, dynamic MA alert is ignored.
 MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average to filter noise
 
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
@@ -404,7 +404,6 @@ def main():
         delta_color = "normal"
         
     # 3. DYNAMIC ALERT (Significant Spike in MILD conditions only)
-    # The DYNAMIC ALERT is only useful for spikes in demand NOT related to operational risk proximity.
     elif peak_above_dynamic and peak_demand < DYNAMIC_MAX_CAP:
         risk_level = "DYNAMIC ALERT (MA Baseline)"
         delta_val = peak_demand - dynamic_trigger_value
