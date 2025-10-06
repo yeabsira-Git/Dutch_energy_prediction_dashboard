@@ -34,8 +34,8 @@ def load_historical_data():
     file_path = 'cleaned_energy_weather_data(1).csv' 
     
     try:
-        # FIX: Added encoding='latin1' to prevent EmptyDataError due to parsing issues
-        df = pd.read_csv(file_path, encoding='latin1') 
+        # FIX: Explicitly setting sep=',' to prevent EmptyDataError due to delimiter inference issues.
+        df = pd.read_csv(file_path, sep=',') 
     except FileNotFoundError:
         st.error("Historical data file 'cleaned_energy_weather_data(1).csv' not found.")
         return pd.DataFrame()
