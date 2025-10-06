@@ -86,9 +86,10 @@ def load_data_and_predict():
     
     df_features = df[FEATURE_COLS].copy()
     
-    # Handle Categorical Columns with One-Hot Encoding (OHE) as LightGBM expects
-    df_features = pd.concat([df_features, pd.get_dummies(df['CountryCode'], prefix='CountryCode', drop_first=True)], axis=1)
-    df_features = pd.concat([df_features, pd.get_dummies(df['Detailed_Time_of_Day'], prefix='Detailed_Time_of_Day')], axis=1)
+    # Handle Categorical Columns with One-Hot Encoding (OHE)
+    # FIX: Using drop_first=False to ensure all OHE columns are created, preventing potential mismatches.
+    df_features = pd.concat([df_features, pd.get_dummies(df['CountryCode'], prefix='CountryCode', drop_first=False)], axis=1)
+    df_features = pd.concat([df_features, pd.get_dummies(df['Detailed_Time_of_Day'], prefix='Detailed_Time_of_Day', drop_first=False)], axis=1)
     
     # 5. Load Model and Predict
     try:
@@ -97,21 +98,37 @@ def load_data_and_predict():
         st.error(f"Model file '{model_file_path}' not found. Cannot generate predictions.")
         return df
 
-    # Get the feature names the model expects (Safest way)
+    # Get the feature names the model expects (this is the safest way)
     try:
-        model_feature_names = model.feature_name_
-        X_predict = df_features.filter(model_feature_names, axis=1)
-        X_predict = X_predict[model_feature_names] # Ensure column order matches
+        model_feature_names = list(model.feature_name_)
+        
+        # --- FIX: Robust Feature Alignment to resolve KeyError ---
+        
+        # Identify columns required by the model but missing in the current feature set
+        missing_cols = set(model_feature_names) - set(df_features.columns)
+        
+        # Add missing columns (common for OHE features not present in the current data slice) and set their value to 0
+        for col in missing_cols:
+            df_features[col] = 0
+            
+        # Identify columns present in the current feature set but NOT required by the model
+        extra_cols = set(df_features.columns) - set(model_feature_names)
+        df_features = df_features.drop(columns=list(extra_cols))
+            
+        # Filter and reorder the DataFrame to only include columns the model was trained on
+        # This addresses the original KeyError by ensuring all columns are present before reindexing
+        X_predict = df_features[model_feature_names]
+
     except AttributeError:
         st.error("Model feature names not found. Skipping prediction.")
         return df
-
+        
     # Predict
     df[VIS_TARGET_COL] = model.predict(X_predict)
     
     return df
 
-# --- PLOTTING FUNCTIONS ---
+# --- PLOTTING FUNCTIONS (Unchanged from previous successful step) ---
 
 @st.cache_data
 def create_demand_heatmap(df):
