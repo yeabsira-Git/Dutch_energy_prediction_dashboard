@@ -4,13 +4,18 @@ import numpy as np
 import altair as alt 
 from datetime import datetime
 import warnings
+import joblib
+import lightgbm as lgb
+
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
-TARGET_COL = 'Demand_MW'
+DATE_COL = 'DateUTC'
+ORIGINAL_TARGET_COL = 'Demand_MW'
+VIS_TARGET_COL = 'Predicted_Demand' 
 TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
-DATE_COL = 'DateUTC'
+MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 
 # --- SCENARIO MAPPING ---
 SCENARIO_MAP = {
@@ -23,218 +28,218 @@ SCENARIO_MAP = {
 # Use the time periods as the options list
 TIME_OF_DAY_OPTIONS = ['Morning', 'Noon', 'Evening', 'Midnight']
 
-# --- DATA LOADING ---
+# --- DATA LOADING AND PREDICTION ---
 
 @st.cache_data
-def load_historical_data():
+def load_data_and_predict():
     """
-    Loads historical data, calculates temperature in Celsius, maps scenarios, 
-    and applies the custom Time-of-Day mapping logic.
+    Loads historical data, engineers features, loads the LightGBM model, 
+    and generates the Predicted_Demand column.
     """
-    file_path = 'cleaned_energy_weather_data(1).csv' 
+    
+    # 1. Load Data
+    data_file_path = 'cleaned_energy_weather_data(1).csv' 
+    model_file_path = MODEL_FILENAME
     
     try:
-        # FIX: Explicitly setting sep=',' to prevent EmptyDataError due to delimiter inference issues.
-        df = pd.read_csv(file_path, sep=',') 
+        df = pd.read_csv(data_file_path, sep=',') 
     except FileNotFoundError:
-        st.error("Historical data file 'cleaned_energy_weather_data(1).csv' not found.")
-        return pd.DataFrame()
-    except pd.errors.EmptyDataError:
-        st.error("Error: The CSV file was found but appears to be empty or unreadable (EmptyDataError).")
+        st.error(f"Data file '{data_file_path}' not found.")
         return pd.DataFrame()
 
-    # Convert DateUTC to datetime and extract the hour (assuming UTC time is used consistently)
+    # 2. Basic Feature Engineering (Must match training features)
     df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True)
     df['hour'] = df[DATE_COL].dt.hour
-    
-    # Calculate temperature in Celsius
     df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
-    
-    # 1. CUSTOM TIME-OF-DAY MAPPING FUNCTION
+
+    # 3. Time-of-Day and Scenario Mapping
     def map_custom_time_of_day(hour):
-        """Maps the hour (0-23) to the custom time periods."""
-        if 0 <= hour <= 5:  # 0:00 to 5:59
-            return 'Midnight'
-        elif 6 <= hour <= 11:  # 6:00 to 11:59
-            return 'Morning'
-        elif 12 <= hour <= 16:  # 12:00 to 16:59
-            return 'Noon'
-        elif 17 <= hour <= 23:  # 17:00 to 23:59
-            return 'Evening'
-        else:
-            return 'Other'
+        if 0 <= hour <= 5: return 'Midnight'
+        elif 6 <= hour <= 11: return 'Morning'
+        elif 12 <= hour <= 16: return 'Noon'
+        elif 17 <= hour <= 23: return 'Evening'
+        else: return 'Other'
             
-    # Apply the custom mapping, overwriting any previous 'Detailed_Time_of_Day' value
     df['Detailed_Time_of_Day'] = df['hour'].apply(map_custom_time_of_day)
 
-    # 2. SCENARIO MAPPING FUNCTION
     def map_temp_to_scenario(temp):
-        """Maps continuous temperature (in Celsius) to one of the four scenarios."""
-        if temp <= 10:
-            return '1. Cold (≤ 10°C)'
-        elif 10 < temp <= 20:
-            return '2. Mild (10°C - 20°C)'
-        elif 20 < temp <= 25:
-            return '3. Warm (20°C - 25°C)'
-        else: 
-            return '4. Summer (> 25°C)'
+        if temp <= 10: return '1. Cold (≤ 10°C)'
+        elif 10 < temp <= 20: return '2. Mild (10°C - 20°C)'
+        elif 20 < temp <= 25: return '3. Warm (20°C - 25°C)'
+        else: return '4. Summer (> 25°C)'
             
     df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
+    df = df[df['Detailed_Time_of_Day'].isin(TIME_OF_DAY_OPTIONS)].copy()
 
-    # Filter out any 'Other' periods just in case (e.g., if there were missing hour data)
-    df = df[df['Detailed_Time_of_Day'].isin(TIME_OF_DAY_OPTIONS)]
+    # 4. Prepare Features for Model
+    
+    # List of numerical/raw features assumed necessary
+    FEATURE_COLS = [
+        'index', 'Cov_ratio', 'Wind Direction (degrees)', 'Hourly Mean Wind Speed (0.1 m/s)', 
+        'Mean Wind Speed (0.1 m/s)', 'Maximum Wind Gust (0.1 m/s)', 
+        'Dew Point Temperature (0.1 degrees Celsius)', 'Sunshine Duration (0.1 hours)', 
+        'Precipitation Duration (0.1 hours)', 'Hourly Precipitation Amount (0.1 mm)', 
+        'Air Pressure (0.1 hPa)', 'Horizontal Visibility', 'Cloud Cover (octants)', 
+        'Relative Atmospheric Humidity (%)', 'Temperature (0.1 degrees Celsius)', 
+        'Global_Radiation_kW/m2', 'hour', TEMP_CELSIUS_COL
+    ]
+    
+    df_features = df[FEATURE_COLS].copy()
+    
+    # Handle Categorical Columns with One-Hot Encoding (OHE) as LightGBM expects
+    df_features = pd.concat([df_features, pd.get_dummies(df['CountryCode'], prefix='CountryCode', drop_first=True)], axis=1)
+    df_features = pd.concat([df_features, pd.get_dummies(df['Detailed_Time_of_Day'], prefix='Detailed_Time_of_Day')], axis=1)
+    
+    # 5. Load Model and Predict
+    try:
+        model = joblib.load(model_file_path)
+    except FileNotFoundError:
+        st.error(f"Model file '{model_file_path}' not found. Cannot generate predictions.")
+        return df
+
+    # Get the feature names the model expects (Safest way)
+    try:
+        model_feature_names = model.feature_name_
+        X_predict = df_features.filter(model_feature_names, axis=1)
+        X_predict = X_predict[model_feature_names] # Ensure column order matches
+    except AttributeError:
+        st.error("Model feature names not found. Skipping prediction.")
+        return df
+
+    # Predict
+    df[VIS_TARGET_COL] = model.predict(X_predict)
     
     return df
 
 # --- PLOTTING FUNCTIONS ---
 
 @st.cache_data
-def create_comparison_plot(df):
-    """
-    Generates a bar chart showing Median Demand for every Time of Day / Scenario 
-    combination, with critical scenarios highlighted.
-    """
+def create_demand_heatmap(df):
+    """Generates a heatmap of Median Predicted Demand vs. Time of Day and Scenario."""
     
-    # 1. Aggregate the data: Median Demand for each combination
-    df_agg = df.groupby(['Detailed_Time_of_Day', 'Scenario'])[TARGET_COL].median().reset_index()
-    df_agg = df_agg.rename(columns={TARGET_COL: 'Median_Demand_MW'})
+    # 1. Aggregate the data: Median Predicted Demand for each combination
+    df_agg = df.groupby(['Detailed_Time_of_Day', 'Scenario'])[VIS_TARGET_COL].median().reset_index()
+    df_agg = df_agg.rename(columns={VIS_TARGET_COL: 'Median_Predicted_Demand_MW'})
     
-    # --- HIGHLIGHTING LOGIC ---
-    def get_highlight_group(row):
-        scenario = row['Scenario']
-        time = row['Detailed_Time_of_Day']
-        
-        # Highlight Warm/Summer Evening spikes (User's request)
-        if time == 'Evening' and ('Warm' in scenario or 'Summer' in scenario):
-            return '🔥 Critical Summer/Warm Evening Spike'
-        # Highlight Cold/Mild Morning spikes (Initial observation)
-        elif time == 'Morning' and ('Cold' in scenario or 'Mild' in scenario):
-            return '🚨 Critical Winter/Mild Morning Spike'
-        else:
-            return 'Baseline Scenario'
-
-    df_agg['Highlight_Group'] = df_agg.apply(get_highlight_group, axis=1)
-    
-    # Define colors for the highlight groups
-    highlight_color_scale = alt.Scale(
-        domain=['🔥 Critical Summer/Warm Evening Spike', '🚨 Critical Winter/Mild Morning Spike', 'Baseline Scenario'],
-        range=['#FF4B4B', '#FF8C00', '#ADD8E6'] # Red, Orange, Light Blue
-    )
-    # ---------------------------
-
-    # Sort the Time of Day and Scenario for consistent plotting order
-    time_order = ['Midnight', 'Morning', 'Noon', 'Evening']
+    # Define orders
+    time_order = ['Morning', 'Noon', 'Evening', 'Midnight']
     scenario_order = list(SCENARIO_MAP.keys())
-    
-    # 2. Create the Faceted Bar Chart
-    chart = alt.Chart(df_agg).mark_bar().encode(
-        # X: Scenario
-        x=alt.X('Scenario:N', title='Temperature Scenario', sort=scenario_order, axis=alt.Axis(labels=False)),
-        
-        # Y: Median Demand
-        y=alt.Y('Median_Demand_MW:Q', title='Median Historical Demand (MW)', scale=alt.Scale(zero=False)),
-        
-        # Color: Use the new Highlight Group
-        color=alt.Color('Highlight_Group:N', title='Scenario Peak Focus', scale=highlight_color_scale),
-        
-        # Column: Time of Day (Faceting)
-        column=alt.Column('Detailed_Time_of_Day:N', 
-                         header=alt.Header(titleOrient="bottom", labelOrient="bottom"), 
-                         sort=time_order, 
-                         title="Time of Day Period"),
-                         
-        # Tooltip for details
+
+    # Create the Heatmap (Mark_rect)
+    base = alt.Chart(df_agg).encode(
+        x=alt.X('Scenario:N', title='Temperature Scenario', sort=scenario_order),
+        y=alt.Y('Detailed_Time_of_Day:N', title='Time of Day Period', sort=time_order),
+    ).properties(
+        title='Median Predicted Demand (MW) by Time of Day and Scenario (Heatmap)'
+    )
+
+    # Rectangles (Heatmap colors)
+    heatmap = base.mark_rect().encode(
+        color=alt.Color('Median_Predicted_Demand_MW:Q', title='Median Predicted Demand (MW)', scale=alt.Scale(range='heatmap'), legend=alt.Legend(orient="top")),
         tooltip=[
             'Detailed_Time_of_Day:N', 
             'Scenario:N', 
-            alt.Tooltip('Median_Demand_MW:Q', title='Median Demand', format=',.0f'),
-            'Highlight_Group:N'
+            alt.Tooltip('Median_Predicted_Demand_MW:Q', title='Median Predicted Demand', format=',.0f')
         ]
-    ).properties(
-        title='Median Demand Spikes Across Time of Day and Scenario (Critical Periods Highlighted)'
-    ).interactive()
-    
+    )
+
+    # Text labels on the heatmap
+    text = base.mark_text(baseline='middle').encode(
+        text=alt.Text('Median_Predicted_Demand_MW:Q', format=',.0f'),
+        color=alt.condition(
+            alt.datum.Median_Predicted_Demand_MW > df_agg['Median_Predicted_Demand_MW'].quantile(0.7), 
+            alt.value('white'),
+            alt.value('black')
+        )
+    )
+
+    chart = heatmap + text
     st.altair_chart(chart, use_container_width=True)
     st.markdown(
         """
-        _This visual enhancement clearly highlights the **Warm/Summer Evening** demand spike 
-        (**🔥 Red**) and the **Cold/Mild Morning** spike (**🚨 Orange**), which are critical inputs for your energy shortage prediction model._
+        _**Summary Heatmap:** This matrix shows the median **Predicted Demand**. It confirms the highest median risk for your early prediction of energy shortages occurs in the **Warm/Summer Evening** and **Cold/Mild Morning** cells._
         """
     )
 
 
 @st.cache_data
-def create_filtered_boxplot(df, selected_time_of_day):
-    """Generates a box plot for Demand vs. Scenario, filtered by Time of Day."""
+def create_time_of_day_boxplots(df, selected_scenario):
+    """Generates four side-by-side box plots for all Time of Day periods, filtered by Scenario, using Predicted Demand."""
     
-    df_filtered = df[df['Detailed_Time_of_Day'] == selected_time_of_day]
-
+    df_filtered = df[df['Scenario'] == selected_scenario].copy()
+    
     if df_filtered.empty:
-        st.warning(f"No historical data found for '{selected_time_of_day}'.")
+        st.warning(f"No data found for scenario '{selected_scenario}'.")
         return
 
-    # Create the single Box Plot (Demand vs. Scenario)
+    time_order = ['Morning', 'Noon', 'Evening', 'Midnight']
+
     chart = alt.Chart(df_filtered).mark_boxplot(extent=1.5).encode(
-        x=alt.X('Scenario:N', title='Temperature Scenario', sort=list(SCENARIO_MAP.keys())),
-        y=alt.Y(TARGET_COL, title='Historical Demand (MW)', scale=alt.Scale(zero=False)),
-        color=alt.Color('Scenario:N', title='Scenario', sort=list(SCENARIO_MAP.keys())),
+        # X: Time of Day (the 4 side-by-side plots)
+        x=alt.X('Detailed_Time_of_Day:N', title='Time of Day Period', sort=time_order),
+        
+        # Y: Predicted Demand
+        y=alt.Y(VIS_TARGET_COL, title='Predicted Demand (MW) Distribution', scale=alt.Scale(zero=False)),
+        
+        # Color: Time of Day (for visual distinction of the four plots)
+        color=alt.Color('Detailed_Time_of_Day:N', title='Time of Day', sort=time_order),
+        
         tooltip=[
-            'Scenario',
-            alt.Tooltip(TARGET_COL, title='Demand (MW) Distribution', format=',.0f')
+            'Detailed_Time_of_Day',
+            alt.Tooltip(VIS_TARGET_COL, title='Predicted Demand (MW)', format=',.0f')
         ]
     ).properties(
-        title=f'Demand Distribution by Scenario (Filtered to: {selected_time_of_day})'
+        title=f'Predicted Demand Distribution by Time of Day (Filtered to: {selected_scenario} Scenario)'
     ).interactive()
     
     st.altair_chart(chart, use_container_width=True)
-    st.markdown(f"**Visualization Details:** The box plot shows the granular distribution (quartiles, outliers) of energy demand shifts across temperature scenarios specifically during the **{selected_time_of_day}** period.")
+    st.markdown(f"**Visualization Details:** These four side-by-side box plots show the detailed distribution (quartiles and outliers) of **Predicted Demand** across your custom time periods, specifically when the temperature is in the **{selected_scenario}** range.")
 
 # --- STREAMLIT APP LAYOUT ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="Historical Demand Scenario Visualizer")
-    st.title("📊 Historical Energy Demand Scenario Visualizer")
-    st.markdown("This dashboard provides the granular historical context necessary for your **early prediction of energy shortages in Dutch neighborhoods**.")
+    st.set_page_config(layout="wide", page_title="Energy Demand Prediction Scenario Visualizer")
+    st.title("📊 Energy Demand Prediction Scenario Visualizer")
+    st.markdown("This dashboard leverages your **LightGBM model** to visualize the predicted energy demand distributions, crucial for your **early prediction of energy shortages in Dutch neighborhoods**.")
 
-    df_historical = load_historical_data()
+    df_predicted = load_data_and_predict()
     
-    if df_historical.empty:
-        # Error handling will be displayed by the load function
+    if df_predicted.empty:
         return
 
     # ----------------------------------------------------------------------
-    # --- COMPARISON PLOT (Summary of Spikes) ---
+    # --- COMPARISON PLOT (Heatmap - Captures the matrix logic) ---
     # ----------------------------------------------------------------------
-    st.subheader("1. Summary of Demand Spikes (Median Demand)")
-    create_comparison_plot(df_historical)
+    st.subheader("1. Summary of Median Predicted Demand by Time/Scenario (Heatmap)")
+    create_demand_heatmap(df_predicted)
     
     st.markdown("---")
     
     # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUTS: TIME OF DAY SELECTION ---
+    # --- INTERACTIVE INPUTS: SCENARIO SELECTION ---
     # ----------------------------------------------------------------------
     st.sidebar.header("Interactive Filter")
     
-    # 1. Time of Day Selection
-    selected_time_of_day = st.sidebar.selectbox(
-        "Select Time of Day Period:",
-        options=TIME_OF_DAY_OPTIONS,
-        index=TIME_OF_DAY_OPTIONS.index('Noon'), # Default to Noon
-        help="Select a specific time period to see the detailed demand distribution across the four temperature scenarios."
+    # 1. Scenario Selection 
+    selected_scenario = st.sidebar.selectbox(
+        "Select Temperature Scenario for Detailed Analysis:",
+        options=list(SCENARIO_MAP.keys()),
+        index=list(SCENARIO_MAP.keys()).index("3. Warm (20°C - 25°C)"), # Default to Warm
+        help="Select a specific temperature scenario to see the detailed Predicted Demand distribution across all four time periods (4 side-by-side box plots)."
     )
     
-    st.sidebar.info(f"Viewing detailed distribution for: **{selected_time_of_day}**")
+    st.sidebar.info(f"Viewing detailed prediction distribution for: **{selected_scenario}**")
 
     st.markdown("---")
     
     # ----------------------------------------------------------------------
-    # --- DETAILED BOX PLOT ---
+    # --- DETAILED BOX PLOT (4 Plots Side-by-Side - Now uses Predictions) ---
     # ----------------------------------------------------------------------
     
-    st.subheader(f"2. Detailed Demand Distribution by Scenario (Filtered to: {selected_time_of_day} Period)")
+    st.subheader(f"2. Predicted Demand Distribution by Time of Day (Filtered to: {selected_scenario} Scenario)")
     
-    # Call the filtered plot function
-    create_filtered_boxplot(df_historical, selected_time_of_day)
+    # Call the new detailed plot function
+    create_time_of_day_boxplots(df_predicted, selected_scenario)
 
 
 # Execute the main function
