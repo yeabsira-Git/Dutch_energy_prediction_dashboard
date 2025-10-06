@@ -17,19 +17,20 @@ TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Example hard limit (in MW). ADJUST THIS TO YOUR NETWORK'S CAPACITY!
-CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
+CAPACITY_THRESHOLD = 15000 # Hard limit (in MW)
 
-# --- NEW: MOVING AVERAGE CONFIGURATION ---
-MA_WINDOW = 168 # 7 days * 24 hours = 168 hours for a weekly moving average
-MA_THRESHOLD_COL = 'Moving_Average_Threshold_MW'
+# NEW THRESHOLD CONSTANTS
+OPERATIONAL_HIGH_THRESHOLD = 14500 # NEW: High Risk Operational threshold (96.7% of 15,000 MW)
+MA_ALERT_BUFFER = 500 # NEW: Buffer (MW) added to the 168-hour Moving Average to filter noise
+
+CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
 # --- SCENARIO MAPPING ---
 SCENARIO_MAP = {
     "1. Cold (0°C - 10°C)": 5.0,     
     "2. Mild (10°C - 20°C)": 15.0,   
     "3. Warm (20°C - 25°C)": 22.5,   
-    "4. Summer (> 25°C)": 30.0       
+    "4. Summer (> 25°C)": 30.0      
 }
 
 # --- TIME PERIOD MAPPING (RESTORED VERBOSE NAMES) ---
@@ -108,11 +109,6 @@ def load_data():
     
     # Forward fill (ffill) weather/lag data if any NaNs remain
     data = data.ffill()
-    
-    # NEW STEP: Calculate the Historical Moving Average
-    target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
-    data[MA_THRESHOLD_COL] = data[target_col_sanitized].rolling(window=MA_WINDOW).mean().shift(1)
-    
     return data
 
 @st.cache_resource
@@ -128,21 +124,27 @@ def load_model():
 # --- 3. PLOTTING FUNCTIONS ---
 
 def create_demand_risk_plot(df_plot, shortage_threshold_col):
-    """Plots Demand, Threshold, and highlights high demand hours."""
+    """Plots Demand, Threshold, and highlights shortage hours for clarity."""
     
     if df_plot.empty:
         st.info("No data available for the selected time range and/or time periods.")
         return
         
-    # Calculate a boolean column for shortage/high demand risk
-    df_plot['High_Demand_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
+    # Calculate a boolean column for shortage
+    df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
+    
+    # Add a column for the Hard Capacity Threshold for plotting
+    df_plot['Hard_Capacity_MW'] = CAPACITY_THRESHOLD
     
     base = alt.Chart(df_plot).encode( 
         x=alt.X(DATE_COL, title='Forecast Date (Hourly)'),
         tooltip=[
             DATE_COL, 
             alt.Tooltip(PREDICTION_COL_NAME, title="Demand (MW)", format=',.2f'),
-            alt.Tooltip(shortage_threshold_col, title="Dynamic Threshold (MW)", format=',.2f'),
+            alt.Tooltip(shortage_threshold_col, title="Statistical Pctl (MW)", format=',.2f'),
+            # Add Hard Capacity to tooltip
+            alt.Tooltip('Hard_Capacity_MW', title="Hard Capacity (MW)", format=',.2f'),
+            alt.Tooltip('Dynamic_Alert_Threshold', title=f"MA + {MA_ALERT_BUFFER} MW", format=',.2f'), # NEW
             alt.Tooltip(TEMP_CELSIUS_COL, title="Temp (°C)"),
             alt.Tooltip('Time_Period', title="Time Period")
         ]
@@ -153,20 +155,31 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
         y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)'),
     )
     
-    # 2. Dynamic Threshold Line (Orange Dashed - VARYING)
-    threshold_line = base.mark_line(color='#ff7f0e', strokeDash=[5, 5]).encode(
-        y=alt.Y(shortage_threshold_col, title='Moving Average Threshold (MW)'),
+    # 2. Global Risk Threshold Line (Red Dashed - STATISTICAL RISK)
+    threshold_line = base.mark_line(color='red', strokeDash=[5, 5]).encode(
+        y=alt.Y(shortage_threshold_col),
     )
 
-    # 3. High Demand Highlight (Red Bars) - Only show when risk is True
-    high_demand_highlight = base.mark_bar(color='#d62728').encode(
-        y=alt.Y(PREDICTION_COL_NAME),
-    ).transform_filter(
-        alt.FieldOneOfPredicate(field='High_Demand_Risk', oneOf=[True])
+    # 3. Hard Capacity Line (Black Dotted - OPERATIONAL LIMIT)
+    capacity_line = base.mark_line(color='black', strokeDash=[1, 1], size=1).encode(
+        y=alt.Y('Hard_Capacity_MW'),
     )
     
-    chart = (demand_line + threshold_line + high_demand_highlight).properties(
-        title=f'Hourly Forecast Demand & High Demand Hours (Threshold: {MA_WINDOW}-hr Moving Average)'
+    # 4. Dynamic Alert Threshold (Purple Dotted - MA + BUFFER)
+    dynamic_line = base.mark_line(color='#800080', strokeDash=[3, 3], size=1).encode(
+        y=alt.Y('Dynamic_Alert_Threshold'),
+    )
+
+    # 5. Shortage Highlight (Orange Bars) - Only show when risk is True
+    shortage_highlight = base.mark_bar(color='#ff7f0e').encode(
+        y=alt.Y(PREDICTION_COL_NAME),
+    ).transform_filter(
+        alt.FieldOneOfPredicate(field='Shortage_Risk', oneOf=[True])
+    )
+    
+    # Combine all lines and bars
+    chart = (demand_line + threshold_line + capacity_line + dynamic_line + shortage_highlight).properties(
+        title='Hourly Energy Demand Forecast: Prediction, Hard Capacity, and Risk Thresholds'
     )
     
     st.altair_chart(chart, use_container_width=True)
@@ -197,8 +210,6 @@ def main():
     
     # Create base time features on the full 6-month period
     future_df = create_features(future_df)
-
-    # ... (Interactive Inputs and Feature Engineering remains the same) ...
 
     # ----------------------------------------------------------------------
     # --- INTERACTIVE INPUTS: SCENARIO SELECTION AND CALENDAR INPUT ---
@@ -322,51 +333,23 @@ def main():
 
     future_df[PREDICTION_COL_NAME] = model.predict(future_df[model_features].astype(float))
     
-    # ----------------------------------------------------------------------
-    # --- DYNAMIC MOVING AVERAGE THRESHOLD CALCULATION & MERGE (New/Modified) ---
-    # ----------------------------------------------------------------------
-    
-    # A. Get the historical MA data calculated in load_data
-    historical_ma = data[MA_THRESHOLD_COL].copy()
-    
-    # B. Since the future demand is predicted, we can only use the historical MA 
-    # to set the threshold for the future. The MA for the future is simply 
-    # the MA of the historical data, extended by the predictions.
-    
-    # For a rolling forecast, we'd use the predicted values to extend the MA.
-    # For this scenario-based dashboard, we'll keep the MA fixed to the historical
-    # MA for a safer comparison (Demand > Historical_MA)
-
-    # C. Concatenate historical MA with a placeholder (NaN) for the future period 
-    # and then forward fill the last known MA to cover the whole future forecast period.
-    # This creates a "Static-Dynamic" baseline for the plot.
-    ma_series_full = pd.concat([historical_ma, pd.Series(index=future_df.index, dtype=float)])
-    
-    # Use the predicted demand to calculate the rolling average *continuously*
-    # This simulates a rolling forecast scenario where the MA is extended based on predictions
-    demand_series_full = pd.concat([data[target_col_sanitized], future_df[PREDICTION_COL_NAME]])
-    
-    # Calculate the continuous Moving Average
-    continuous_ma = demand_series_full.rolling(window=MA_WINDOW).mean().shift(1)
-    
-    # Isolate the MA for the future period
-    future_df[MA_THRESHOLD_COL] = continuous_ma.tail(len(future_df))
-    
-    # Fill any remaining NaNs (at the very start of the forecast) with the last historical value
-    future_df[MA_THRESHOLD_COL] = future_df[MA_THRESHOLD_COL].ffill() 
-    
     # --- DASHBOARD LAYOUT AND METRICS ---
     
-    st.subheader(f"1. Core Risk Metrics & Shortage Analysis (Dynamic Threshold: {MA_WINDOW}-hr MA)")
+    st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
-    # The Global 99th Percentile is now a secondary metric
+    # Calculate HOURLY 99th Percentile Shortage Threshold 
     hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
     hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
+    
+    # GLOBAL_RISK_THRESHOLD is still calculated, but used only for the plot and statistical context
     GLOBAL_RISK_THRESHOLD = hourly_threshold_df['Shortage_Threshold_MW'].max()
     
     # Prepare the full 6-month prediction DataFrame
     df_full_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
     df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
+    
+    # Apply the single, flat threshold for plotting and statistical risk flagging
+    df_full_plot['Global_Risk_Threshold_MW'] = GLOBAL_RISK_THRESHOLD
     
     # Add Time_Period column for filtering
     df_full_plot['Time_Period'] = df_full_plot['hour'].apply(map_hour_to_period)
@@ -375,53 +358,72 @@ def main():
     df_plot = df_full_plot[
         (df_full_plot[DATE_COL] >= start_date_filter) & 
         (df_full_plot[DATE_COL] <= end_date_filter) &
-        (df_full_plot['Time_Period'].isin(selected_periods)) # Apply Time of Day filter
+        (df_full_plot['Time_Period'].isin(selected_periods)) 
     ].copy()
+    
+    # --- Calculate Dynamic Threshold for the FILTERED (displayed) data ---
+    
+    # Recalculate the 168-hour MA using ONLY the filtered prediction data
+    # (Note: This is an approximation for the displayed window, but works for the dynamic alert concept)
+    df_plot['168_hr_MA'] = df_plot[PREDICTION_COL_NAME].rolling(window=168, min_periods=1).mean()
+    df_plot['Dynamic_Alert_Threshold'] = df_plot['168_hr_MA'] + MA_ALERT_BUFFER
+    
     
     # --- RISK ANALYSIS using the FILTERED (displayed) data ---
     
     if df_plot.empty:
-          st.error("No data points for the selected date range and time periods. Please adjust your filters.")
-          return
-          
+         st.error("No data points for the selected date range and time periods. Please adjust your filters.")
+         return
+         
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
     peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
     
-    # NEW LOGIC: High Demand hours are defined by exceeding the DYNAMIC MOVING AVERAGE THRESHOLD
-    high_demand_hours = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot[MA_THRESHOLD_COL]]
+    # Check if the peak is above the dynamic threshold
+    peak_above_dynamic = peak_demand > peak_row['Dynamic_Alert_Threshold']
+    dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
     
-    # MODIFIED LOGIC: Anchor all low-risk reporting to the Hard Capacity (15,000 MW)
+    # Shortage hours based on STATISTICAL threshold (only used for Hour count metric)
+    shortage_hours_statistical = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot['Global_Risk_Threshold_MW']]
+    
+    # NEW LOGIC: Hierarchical Operational Risk Status
+    
+    # 1. CRITICAL (Absolute Capacity Breach)
     if peak_demand > CAPACITY_THRESHOLD:
-        risk_level = "CRITICAL (Capacity Exceeded)"
-        # Delta based on exceeding hard capacity
+        risk_level = "CRITICAL"
         delta_val = peak_demand - CAPACITY_THRESHOLD
         delta = f"↑ {delta_val:,.2f} MW **above Hard Capacity**"
         delta_color = "inverse"
-    elif not high_demand_hours.empty:
-        risk_level = "HIGH (Above MA Baseline)"
-        # Delta based on exceeding Moving Average
-        max_high_demand_delta = (high_demand_hours[PREDICTION_COL_NAME] - high_demand_hours[MA_THRESHOLD_COL]).max()
-        delta = f"↑ {max_high_demand_delta:,.2f} MW above {MA_WINDOW}-hr MA"
-        delta_color = "normal"
-    else:
-        # NEW: Report as PEAK SUMMARY, with delta based on remaining buffer to HARD CAPACITY (15,000 MW)
-        risk_level = "NORMAL (Below MA Baseline)"
-        # Calculate the buffer (difference to HARD CAPACITY)
+    
+    # 2. HIGH DEMAND (Operational Proximity)
+    elif peak_demand > OPERATIONAL_HIGH_THRESHOLD:
+        risk_level = "HIGH DEMAND"
         delta_val = CAPACITY_THRESHOLD - peak_demand
-        # Show the buffer as the delta
+        delta = f"Peak is ↓ {delta_val:,.2f} MW **to Hard Capacity**"
+        delta_color = "normal"
+        
+    # 3. DYNAMIC ALERT (Significant Spike above MA + Buffer)
+    elif peak_above_dynamic:
+        risk_level = "DYNAMIC ALERT"
+        delta_val = peak_demand - dynamic_trigger_value
+        delta = f"↑ {delta_val:,.2f} MW **above MA + {MA_ALERT_BUFFER} MW**"
+        delta_color = "normal" 
+    
+    # 4. LOW DEMAND (Routine Conditions)
+    else:
+        risk_level = "LOW DEMAND"
+        delta_val = CAPACITY_THRESHOLD - peak_demand
         delta = f"Peak is ↓ {delta_val:,.2f} MW **below Hard Capacity**"
-        delta_color = "off" # No color change for a positive safety margin
+        delta_color = "off" 
         
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric(
-            label=f"Forecast Risk / Peak Summary (Dynamic {MA_WINDOW}-hr MA)", 
+            label="Forecast Risk Status (Filtered View)", 
             value=risk_level, 
-            # Show the buffer to the hard capacity threshold in the delta text
             delta=delta,
             delta_color=delta_color 
         )
@@ -430,7 +432,7 @@ def main():
             label="Peak Predicted Demand (MW)", 
             value=f"{peak_demand:,.2f}", 
             # Show how many hours exceeded the statistical threshold, providing statistical context
-            delta=f"Hours > MA: {len(high_demand_hours)}",
+            delta=f"Hours > Global 99th Pctl: {len(shortage_hours_statistical)}",
             delta_color="off"
         )
     with col3:
@@ -441,17 +443,19 @@ def main():
             delta_color="off"
         )
     
-    # Display the new dynamic threshold calculation detail
-    st.markdown(f"**Dynamic High Demand Threshold:** Predicted Demand > **{MA_WINDOW}-hour Moving Average**")
-    st.markdown(f"*(For context, the **Global 99th Percentile** (fixed threshold) is: **{GLOBAL_RISK_THRESHOLD:,.2f} MW**)*")
+    # Keep both threshold values displayed clearly
+    st.markdown(f"**Operational Hard Capacity (CRITICAL Trigger):** **{CAPACITY_THRESHOLD:,.2f} MW** (Black Dotted Line on Plot)")
+    st.markdown(f"**Operational High Demand Trigger:** **{OPERATIONAL_HIGH_THRESHOLD:,.2f} MW**")
+    st.markdown(f"**Dynamic Alert Trigger (MA + {MA_ALERT_BUFFER} MW):** **{dynamic_trigger_value:,.2f} MW** (Purple Dotted Line on Plot)")
+    st.markdown(f"**Statistical High-Risk Threshold (Global 99th Percentile):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line on Plot)")
     st.markdown("---")
     
     # --- DASHBOARD PLOTS ---
     
-    st.subheader("2. Hourly Energy Demand Forecast and Dynamic High Demand Risk")
+    st.subheader("2. Hourly Energy Demand Forecast and Shortage Risk")
     
-    # Pass the DYNAMIC MOVING AVERAGE THRESHOLD column to the plot
-    create_demand_risk_plot(df_plot, MA_THRESHOLD_COL)
+    # Pass the Global 99th Pctl as the threshold for the plot
+    create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW')
 
 
 # Execute the main function
