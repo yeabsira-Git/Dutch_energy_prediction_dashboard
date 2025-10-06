@@ -17,8 +17,6 @@ TEMP_CELSIUS_COL = 'Temperature_C'
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
 
-# NOTE: All risk thresholds and constants have been removed.
-
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
 # --- SCENARIO MAPPING (Used for fixed temperature input) ---
@@ -102,7 +100,53 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- PLOTTING FUNCTION (Simplified) ---
+# --- PLOTTING FUNCTIONS ---
+
+@st.cache_data
+def create_historical_boxplot():
+    """Generates and displays the historical demand distribution by temperature scenario using a box plot."""
+    
+    file_path = 'cleaned_energy_weather_data(1).csv' 
+    
+    try:
+        df = pd.read_csv(file_path)
+    except FileNotFoundError:
+        st.error("Historical data file not found to generate context plot.")
+        return
+
+    # Preprocessing
+    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
+    
+    # Mapping function (must be defined locally or imported)
+    def map_temp_to_scenario(temp):
+        """Maps continuous temperature (in Celsius) to one of the four scenarios."""
+        if temp <= 10:
+            return '1. Cold (≤ 10°C)'
+        elif 10 < temp <= 20:
+            return '2. Mild (10°C - 20°C)'
+        elif 20 < temp <= 25:
+            return '3. Warm (20°C - 25°C)'
+        else: 
+            return '4. Summer (> 25°C)'
+
+    # Calculate and plot
+    df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
+
+    chart = alt.Chart(df).mark_boxplot(extent=1.5).encode(
+        x=alt.X('Scenario:N', title='Temperature Scenario', sort=list(SCENARIO_MAP.keys())),
+        y=alt.Y(TARGET_COL, title='Historical Demand (MW)', scale=alt.Scale(zero=False)),
+        color=alt.Color('Scenario:N', title='Scenario'),
+        tooltip=[
+            'Scenario',
+            alt.Tooltip(TARGET_COL, title='Demand (MW) Distribution', format=',.0f')
+        ]
+    ).properties(
+        title='Historical Demand Distribution by Temperature Scenario'
+    ).interactive()
+    
+    st.altair_chart(chart, use_container_width=True)
+    st.markdown("_Box plots show the median (middle line), the interquartile range (box), and min/max range (whiskers) of historical demand for each scenario._")
+
 
 def create_demand_plot(df_plot):
     """Plots only the predicted demand line (no risk thresholds)."""
@@ -274,9 +318,34 @@ def main():
         (df_full_plot[DATE_COL] <= end_date_filter) 
     ].copy()
     
+    # Calculate simple peak metrics for summary
+    peak_demand = df_plot[PREDICTION_COL_NAME].max()
+    peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
+    
     # ----------------------------------------------------------------------
-    # --- DASHBOARD PLOT ---
+    # --- DASHBOARD LAYOUT ---
     # ----------------------------------------------------------------------
+    
+    col_summary, col_boxplot = st.columns([1, 1])
+
+    with col_summary:
+        st.subheader("Forecast Summary")
+        st.metric(
+            label="Peak Predicted Demand (MW) in Selected Range", 
+            value=f"{peak_demand:,.2f}", 
+            delta=f"Scenario: {selected_scenario}",
+            delta_color="off"
+        )
+        st.markdown(f"**Peak Time:** {peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')}")
+        st.markdown(f"**Scenario Temperature:** **{temp_forecast_celsius:.1f}°C** (Fixed for Forecast)")
+        st.markdown("---")
+        st.markdown("Use the controls on the left to change the scenario and date range.")
+        
+    with col_boxplot:
+        st.subheader("Historical Demand Context (Box Plot)")
+        create_historical_boxplot()
+
+    st.markdown("---")
     
     st.subheader("Hourly Energy Demand Forecast (Zoomable)")
     
