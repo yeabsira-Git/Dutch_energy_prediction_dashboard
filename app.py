@@ -20,6 +20,15 @@ PREDICTION_COL_NAME = 'Predicted_Demand'
 CAPACITY_THRESHOLD = 15000 # Example hard limit (in MW). ADJUST THIS TO YOUR NETWORK'S CAPACITY!
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
+# --- SCENARIO MAPPING ---
+# Representative temperature used for the full 6-month prediction for each scenario
+SCENARIO_MAP = {
+    "1. Cold (0°C - 10°C)": 5.0,     # Midpoint
+    "2. Mild (10°C - 20°C)": 15.0,   # Midpoint
+    "3. Warm (20°C - 25°C)": 22.5,   # Midpoint
+    "4. Summer (> 25°C)": 30.0      # Representative high value for summer demand
+}
+
 # --- 1. UTILITY FUNCTIONS ---
 
 def sanitize_feature_names(columns):
@@ -221,20 +230,20 @@ def main():
     future_df = create_features(future_df)
 
     # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUTS: TEMPERATURE AND DATE RANGE SLIDERS ---
+    # --- INTERACTIVE INPUTS: SCENARIO SELECTION AND DATE RANGE SLIDER ---
     # ----------------------------------------------------------------------
     st.sidebar.header("6-Month Forecast Scenario Controls")
     
-    # 1. Temperature Slider (Hypothetical Scenario)
-    temp_forecast_celsius = st.sidebar.slider(
-        "1. Set Persistent Forecast Temperature (°C):",
-        min_value=-15.0, 
-        max_value=35.0,
-        value=15.0, 
-        step=0.5,
-        format='%.1f °C',
-        help="Simulate a constant temperature over the entire 6-month period (July-Dec)."
+    # 1. Temperature Scenario Selection (Replacing the continuous slider)
+    selected_scenario = st.sidebar.selectbox(
+        "1. Select Temperature Scenario:",
+        options=list(SCENARIO_MAP.keys()),
+        index=1, # Default to Mild (10-20C)
+        help="Select a fixed temperature profile for the entire forecast period to test scenarios."
     )
+    # Map the selection to the representative temperature
+    temp_forecast_celsius = SCENARIO_MAP[selected_scenario]
+    
     
     # 2. Date Range Slider (Zoom Control)
     full_date_range = future_df.index.normalize().unique()
@@ -257,7 +266,7 @@ def main():
     start_date_filter = pd.to_datetime(selected_date_range[0]).normalize()
     end_date_filter = pd.to_datetime(selected_date_range[1]).normalize() + pd.Timedelta(hours=23)
     
-    st.sidebar.info(f"Scenario Temperature: **{temp_forecast_celsius:.1f}°C**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
+    st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
     st.markdown("---")
     
     # Apply temperature settings to future_df
