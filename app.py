@@ -212,27 +212,22 @@ def main():
     temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
     
     # ----------------------------------------------------------------------
-    # --- INTERACTIVE INPUT: SCENARIO SELECTION ---
+    # --- INTERACTIVE INPUT: CONTINUOUS SLIDER ---
     # ----------------------------------------------------------------------
     st.sidebar.header("24-Hour Forecast Scenario")
     
-    SCENARIOS = {
-        "Cold (0°C - 10°C)": 5.0,     # Representative temperature 5.0°C
-        "Mild (10°C - 20°C)": 15.0,    # Representative temperature 15.0°C
-        "Warm (20°C - 25°C)": 22.5,   # Representative temperature 22.5°C
-        "Summer (> 25°C)": 28.0       # Representative temperature 28.0°C
-    }
-    
-    scenario_selection = st.sidebar.selectbox(
-        "Select Temperature Scenario:",
-        options=list(SCENARIOS.keys()),
-        index=1, # Default to Mild
-        help="Choose a typical temperature range to test its impact on energy demand."
+    # Replaced st.selectbox with st.slider for continuous temperature control
+    temp_forecast_celsius = st.sidebar.slider(
+        "Set Persistent Forecast Temperature (°C):",
+        min_value=-15.0, # Allows extreme cold
+        max_value=35.0,
+        value=15.0, # Default to a mild temperature
+        step=0.5,
+        format='%.1f °C',
+        help="Use this slider to simulate a constant temperature over the next 24 hours and observe the predicted demand response."
     )
     
-    temp_forecast_celsius = SCENARIOS[scenario_selection]
-    
-    st.sidebar.info(f"Using a persistent forecast temperature of **{temp_forecast_celsius:.1f}°C** for the next 24 hours.")
+    st.sidebar.info(f"Using a constant forecast temperature of **{temp_forecast_celsius:.1f}°C** for the next 24 hours.")
     st.markdown("---")
     
     # --- SIMULATE FUTURE DATA FOR PREDICTION (24 hours) ---
@@ -244,8 +239,8 @@ def main():
     future_df = create_features(future_df)
     
     # Use the interactive temperature input for the entire forecast period
-    # Convert from Celsius to model's expected format (0.1 degrees Celsius)
-    temp_0_1_degrees = (temp_forecast_celsius * 10).astype(int) 
+    # CORRECTED: Use int() for type conversion of the Python float.
+    temp_0_1_degrees = int(temp_forecast_celsius * 10) 
 
     # Set the two temperature columns
     future_df[temp_col_sanitized] = temp_0_1_degrees 
