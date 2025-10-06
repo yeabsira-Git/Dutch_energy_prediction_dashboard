@@ -17,7 +17,7 @@ TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 TEMP_CELSIUS_COL = 'Temperature_C' 
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
-CAPACITY_THRESHOLD = 15000 # Retained for plot display reference
+CAPACITY_THRESHOLD = 15000 
 
 # RELATIVE RISK THRESHOLDS
 MA_ALERT_BUFFER = 500 # Buffer (MW) added to the 168-hour Moving Average
@@ -28,7 +28,7 @@ WARM_SUMMER_CRITICAL_PERIOD = 'Evening (17:00 - 23:59)'
 
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 
-# --- SCENARIO MAPPING (Still used for fixed temperature input) ---
+# --- SCENARIO MAPPING ---
 SCENARIO_MAP = {
     "1. Cold (0°C - 10°C)": 5.0,     
     "2. Mild (10°C - 20°C)": 15.0,   
@@ -109,7 +109,7 @@ def load_model():
         st.error(f"Model file '{MODEL_FILENAME}' not found. Please ensure the LightGBM model is uploaded.")
         return None
 
-# --- PLOTTING FUNCTIONS (Restored to Risk Plot) ---
+# --- PLOTTING FUNCTIONS ---
 
 def create_demand_risk_plot(df_plot, shortage_threshold_col, dynamic_threshold_col):
     """Plots Demand, Thresholds, and highlights hours above the statistical threshold."""
@@ -169,6 +169,61 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col, dynamic_threshold_c
     )
     
     st.altair_chart(chart.interactive(), use_container_width=True)
+
+
+@st.cache_data
+def plot_eda_context():
+    """Generates and displays the historical average demand by hour for context."""
+    
+    file_path = 'cleaned_energy_weather_data(1).csv' 
+    
+    try:
+        # NOTE: Read raw data again to be self-contained and avoid cache issues
+        df = pd.read_csv(file_path)
+    except FileNotFoundError:
+        st.error("Historical data file not found to generate context plot.")
+        return
+
+    # Preprocessing
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True)
+    df['hour'] = df[DATE_COL].dt.hour
+    df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
+
+    def map_temp_to_scenario(temp):
+        """Maps continuous temperature (in Celsius) to one of the four scenarios."""
+        if temp <= 10:
+            return '1. Cold (≤ 10°C)'
+        elif 10 < temp <= 20:
+            return '2. Mild (10°C - 20°C)'
+        elif 20 < temp <= 25:
+            return '3. Warm (20°C - 25°C)'
+        else: 
+            return '4. Summer (> 25°C)'
+
+    # Calculate and plot
+    df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
+    df_avg_demand = df.groupby(['Scenario', 'hour'])[TARGET_COL].mean().reset_index()
+    df_avg_demand.columns = ['Scenario', 'Hour_of_Day', 'Average_Demand_MW']
+
+    base = alt.Chart(df_avg_demand).encode(
+        x=alt.X('Hour_of_Day:O', title='Hour of Day (0 = Midnight)', axis=alt.Axis(labelAngle=0)),
+        y=alt.Y('Average_Demand_MW:Q', title='Average Energy Demand (MW)'),
+        color=alt.Color('Scenario:N', title='Temperature Scenario')
+    )
+    demand_line = base.mark_line(point=True).encode(
+        strokeWidth=alt.value(3),
+        tooltip=[
+            alt.Tooltip('Scenario'),
+            alt.Tooltip('Hour_of_Day', title='Hour'),
+            alt.Tooltip('Average_Demand_MW', title='Avg Demand (MW)', format=',.2f')
+        ]
+    ).properties(
+        title='Historical Average Demand vs. Hour of Day by Temperature Scenario'
+    )
+    
+    # Make the chart interactive
+    st.altair_chart(demand_line.interactive(), use_container_width=True)
+    st.markdown("_This historical plot demonstrates how the average daily demand curve shifts based on temperature, validating the scenario approach._")
 
 
 # --- STREAMLIT APP LAYOUT ---
@@ -297,7 +352,7 @@ def main():
     future_df[PREDICTION_COL_NAME] = model.predict(future_df[model_features].astype(float))
     
     # ----------------------------------------------------------------------
-    # --- RISK CALCULATION (Restored) ---
+    # --- RISK CALCULATION ---
     # ----------------------------------------------------------------------
     
     # Calculate HOURLY 99th Percentile Shortage Threshold 
@@ -323,72 +378,76 @@ def main():
     
     
     # ----------------------------------------------------------------------
-    # --- DASHBOARD LAYOUT AND METRICS (Restored) ---
+    # --- DASHBOARD LAYOUT ---
     # ----------------------------------------------------------------------
     
-    st.subheader("1. Core Forecast Risk Metrics & Analysis")
-    
-    if df_plot.empty:
-         st.error("No data points for the selected date range. Please adjust your filters.")
-         return
-         
-    peak_demand = df_plot[PREDICTION_COL_NAME].max()
-    peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
-    peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
-    peak_temp = peak_row[TEMP_CELSIUS_COL]
-    peak_hour = peak_row['hour']
-    dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
-    
-    peak_above_dynamic = peak_demand > dynamic_trigger_value
+    col_context, col_analysis = st.columns([1, 1])
 
-    # --- SIMPLIFIED RELATIVE RISK LOGIC (HIGH DEMAND / DYNAMIC SPIKE / LOW DEMAND) ---
-    
-    if peak_demand > GLOBAL_RISK_THRESHOLD:
-        risk_level = "HIGH DEMAND"
-        delta_val = peak_demand - GLOBAL_RISK_THRESHOLD
-        delta = f"↑ {delta_val:,.2f} MW **above Global 99th Pctl!**"
-        delta_color = "inverse"
-        
-    elif peak_above_dynamic:
-        risk_level = "DYNAMIC SPIKE"
-        delta_val = peak_demand - dynamic_trigger_value
-        delta = f"↑ {delta_val:,.2f} MW **above MA (Short-Term Surge)**"
-        delta_color = "normal"
-    
-    else:
-        risk_level = "LOW DEMAND"
-        margin_below_dynamic = dynamic_trigger_value - peak_demand if dynamic_trigger_value > peak_demand else 0 
-        delta = f"Peak is ↓ {margin_below_dynamic:,.2f} MW **below Dynamic Alert Threshold**"
-        delta_color = "off"
-        
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.metric(
-            label="Forecast Risk Status (Filtered View)", 
-            value=risk_level, 
-            delta=delta,
-            delta_color=delta_color 
-        )
-    with col2:
-        st.metric(
-            label="Peak Predicted Demand (MW)", 
-            value=f"{peak_demand:,.2f}", 
-            delta=f"Peak Hour: {peak_hour:02d}:00",
-            delta_color="off"
-        )
+    with col_context:
+        st.subheader("1. Historical Context: Average Daily Demand Curves")
+        plot_eda_context() # RESTORED SCENARIO PLOT
 
-    st.markdown(f"**Scenario Temperature:** **{peak_temp:.1f}°C** (Fixed for Forecast)")
-    st.markdown(f"**Absolute Risk Trigger (99th Pctl):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line)")
-    st.markdown(f"**Relative Spike Trigger (MA + 500 MW):** **{dynamic_trigger_value:,.2f} MW** (Purple Dotted Line)")
+    with col_analysis:
+        st.subheader("2. Core Forecast Risk Metrics & Analysis")
+        
+        if df_plot.empty:
+             st.error("No data points for the selected date range. Please adjust your filters.")
+             return
+             
+        peak_demand = df_plot[PREDICTION_COL_NAME].max()
+        peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
+        peak_temp = peak_row[TEMP_CELSIUS_COL]
+        peak_hour = peak_row['hour']
+        dynamic_trigger_value = peak_row['Dynamic_Alert_Threshold']
+        
+        peak_above_dynamic = peak_demand > dynamic_trigger_value
+
+        # --- RISK LOGIC ---
+        if peak_demand > GLOBAL_RISK_THRESHOLD:
+            risk_level = "HIGH DEMAND"
+            delta_val = peak_demand - GLOBAL_RISK_THRESHOLD
+            delta = f"↑ {delta_val:,.2f} MW **above Global 99th Pctl!**"
+            delta_color = "inverse"
+        elif peak_above_dynamic:
+            risk_level = "DYNAMIC SPIKE"
+            delta_val = peak_demand - dynamic_trigger_value
+            delta = f"↑ {delta_val:,.2f} MW **above MA (Short-Term Surge)**"
+            delta_color = "normal"
+        else:
+            risk_level = "LOW DEMAND"
+            margin_below_dynamic = dynamic_trigger_value - peak_demand if dynamic_trigger_value > peak_demand else 0 
+            delta = f"Peak is ↓ {margin_below_dynamic:,.2f} MW **below Dynamic Alert Threshold**"
+            delta_color = "off"
+            
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric(
+                label="Forecast Risk Status (Filtered View)", 
+                value=risk_level, 
+                delta=delta,
+                delta_color=delta_color 
+            )
+        with col2:
+            st.metric(
+                label="Peak Predicted Demand (MW)", 
+                value=f"{peak_demand:,.2f}", 
+                delta=f"Peak Hour: {peak_hour:02d}:00",
+                delta_color="off"
+            )
+
+        st.markdown(f"**Scenario Temperature:** **{peak_temp:.1f}°C** (Fixed for Forecast)")
+        st.markdown(f"**Absolute Risk Trigger (99th Pctl):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW** (Red Dashed Line)")
+        st.markdown(f"**Relative Spike Trigger (MA + 500 MW):** **{dynamic_trigger_value:,.2f} MW** (Purple Dotted Line)")
+        
     st.markdown("---")
     
     # --- DASHBOARD PLOTS ---
     
-    st.subheader("2. Hourly Demand Forecast for Selected Period (Risk Visualization)")
+    st.subheader("3. Hourly Demand Forecast for Selected Period (Risk Visualization)")
     
-    # Call the restored risk plot function
+    # Call the risk plot function
     create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW', 'Dynamic_Alert_Threshold')
 
 
