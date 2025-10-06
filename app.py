@@ -126,7 +126,6 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
         return
         
     # Calculate a boolean column for shortage
-    # The shortage_threshold_col now contains the single GLOBAL_RISK_THRESHOLD
     df_plot['Shortage_Risk'] = df_plot[PREDICTION_COL_NAME] > df_plot[shortage_threshold_col]
     
     base = alt.Chart(df_plot).encode( 
@@ -145,7 +144,7 @@ def create_demand_risk_plot(df_plot, shortage_threshold_col):
         y=alt.Y(PREDICTION_COL_NAME, title='Demand (MW)'),
     )
     
-    # 2. Global Threshold Line (Red Dashed - NOW FLAT)
+    # 2. Global Threshold Line (Red Dashed - FLAT)
     threshold_line = base.mark_line(color='red', strokeDash=[5, 5]).encode(
         y=alt.Y(shortage_threshold_col),
     )
@@ -224,7 +223,7 @@ def main():
         start_date_filter = pd.to_datetime(selected_dates[0]).tz_localize('UTC').normalize()
         end_date_filter = (pd.to_datetime(selected_dates[1]).tz_localize('UTC').normalize() + pd.Timedelta(hours=23))
         
-        # RESTORED: Sidebar info box
+        # Sidebar info box
         st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
     else:
         st.error("Please select both a start and end date from the calendar.")
@@ -316,18 +315,18 @@ def main():
     
     st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
-    # Calculate HOURLY 99th Percentile Shortage Threshold (Needed to define the GLOBAL_RISK_THRESHOLD)
+    # Calculate HOURLY 99th Percentile Shortage Threshold (Needed for plotting/HIGH risk only)
     hourly_threshold_df = data.groupby('hour')[target_col_sanitized].quantile(0.99).reset_index()
     hourly_threshold_df.columns = ['hour', 'Shortage_Threshold_MW']
     
-    # NEW LOGIC: Define the GLOBAL_RISK_THRESHOLD as the maximum 99th percentile across all hours.
+    # GLOBAL_RISK_THRESHOLD is still calculated, but used only for the plot and HIGH risk flag
     GLOBAL_RISK_THRESHOLD = hourly_threshold_df['Shortage_Threshold_MW'].max()
     
     # Prepare the full 6-month prediction DataFrame
     df_full_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
     df_full_plot = df_full_plot.reset_index(names=[DATE_COL]) 
     
-    # Apply the single, flat threshold for plotting and risk flagging
+    # Apply the single, flat threshold for plotting and HIGH risk flagging
     df_full_plot['Global_Risk_Threshold_MW'] = GLOBAL_RISK_THRESHOLD
     
     # Add Time_Period column for filtering
@@ -351,38 +350,49 @@ def main():
     peak_time_full = peak_row[DATE_COL].strftime('%Y-%m-%d %H:%M')
     peak_temp = peak_row[TEMP_CELSIUS_COL]
     
-    # NEW: Shortage hours are defined by exceeding the GLOBAL_RISK_THRESHOLD
+    # Shortage hours are defined by exceeding the GLOBAL_RISK_THRESHOLD
     shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > df_plot['Global_Risk_Threshold_MW']]
     
+    # MODIFIED LOGIC: Anchor all low-risk reporting to the Hard Capacity (15,000 MW)
     if peak_demand > CAPACITY_THRESHOLD:
         risk_level = "CRITICAL"
+        # Delta based on exceeding hard capacity
         delta_val = peak_demand - CAPACITY_THRESHOLD
-        delta = f"↑ {delta_val:,.2f} MW above Hard Capacity"
+        delta = f"↑ {delta_val:,.2f} MW **above Hard Capacity**"
+        delta_color = "inverse"
     elif not shortage_hours.empty:
         risk_level = "HIGH"
+        # Delta based on exceeding Global 99th Pctl
         max_shortage_delta = (shortage_hours[PREDICTION_COL_NAME] - GLOBAL_RISK_THRESHOLD).max()
         delta = f"↑ {max_shortage_delta:,.2f} MW above Global 99th Pctl"
+        delta_color = "normal"
     else:
-        risk_level = "LOW"
-        delta_val = GLOBAL_RISK_THRESHOLD - peak_demand
-        delta = f"↓ {delta_val:,.2f} MW below Global 99th Pctl"
+        # NEW: Report as PEAK SUMMARY, with delta based on remaining buffer to HARD CAPACITY (15,000 MW)
+        risk_level = "PEAK SUMMARY"
+        # Calculate the buffer (difference to HARD CAPACITY)
+        delta_val = CAPACITY_THRESHOLD - peak_demand
+        # Show the buffer as the delta
+        delta = f"Peak is ↓ {delta_val:,.2f} MW **below Hard Capacity**"
+        delta_color = "off" # No color change for a positive safety margin
         
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric(
-            label="Shortage Risk Score (Filtered View)", 
+            label="Forecast Risk / Peak Summary (Filtered View)", 
             value=risk_level, 
-            delta=f"Hours above Global 99th Pctl: {len(shortage_hours)}",
-            delta_color="off" 
+            # Show the buffer to the hard capacity threshold in the delta text
+            delta=delta,
+            delta_color=delta_color 
         )
     with col2:
         st.metric(
             label="Peak Predicted Demand (MW)", 
             value=f"{peak_demand:,.2f}", 
-            delta=delta,
-            delta_color="normal"
+            # Show how many hours exceeded the statistical threshold, providing statistical context
+            delta=f"Hours > 99th Pctl: {len(shortage_hours)}",
+            delta_color="off"
         )
     with col3:
         st.metric(
@@ -392,15 +402,15 @@ def main():
             delta_color="off"
         )
     
-    # Display the new threshold value clearly
-    st.markdown(f"**Absolute High-Risk Threshold (Global 99th Percentile):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW**")
+    # Keep the Global 99th Pctl value displayed as a separate data point
+    st.markdown(f"**Statistical High-Risk Threshold (Global 99th Percentile):** **{GLOBAL_RISK_THRESHOLD:,.2f} MW**")
     st.markdown("---")
     
     # --- DASHBOARD PLOTS ---
     
     st.subheader("2. Hourly Energy Demand Forecast and Shortage Risk")
     
-    # Pass the new flat threshold column to the plotting function
+    # Pass the Global 99th Pctl as the threshold for the plot
     create_demand_risk_plot(df_plot, 'Global_Risk_Threshold_MW')
 
 
