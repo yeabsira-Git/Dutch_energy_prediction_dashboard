@@ -258,4 +258,96 @@ def main():
 
     # 2.2. Advanced Temperature Features
     lag_df['temp_lag24'] = lag_df[temp_col_sanitized].shift(24)
-    lag_df['temp_roll
+    lag_df['temp_roll72'] = lag_df[temp_col_sanitized].shift(1).rolling(72).mean()
+    lag_df['temp_roll168'] = lag_df[temp_col_sanitized].shift(1).rolling(168).mean()
+    
+    # Merge calculated features back into future_df
+    # We slice off the historical rows and only keep the future ones
+    lag_features = lag_df.columns.difference(lag_cols)
+    future_df = future_df.join(lag_df[lag_features].tail(len(future_df)))
+    
+    # --- 3. Final Prediction ---
+    
+    # Ensure data types are numeric and handle any remaining NaNs in the forecast period
+    future_df = future_df.fillna(future_df.median())
+    
+    # Select the features in the EXACT order the model expects
+    model_features = expected_model_features
+
+    future_df[PREDICTION_COL_NAME] = model.predict(future_df[model_features].astype(float))
+    
+    # --- DASHBOARD LAYOUT AND METRICS ---
+    
+    st.subheader("1. Core Risk Metrics & Shortage Analysis")
+    
+    shortage_threshold = data[target_col_sanitized].quantile(0.99)
+    
+    df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
+    peak_demand = df_plot[PREDICTION_COL_NAME].max()
+    
+    peak_row = df_plot.loc[df_plot[PREDICTION_COL_NAME].idxmax()]
+    peak_time = peak_row.name.strftime('%H:%M')
+    peak_temp = peak_row[TEMP_CELSIUS_COL]
+    
+    if peak_demand > CAPACITY_THRESHOLD:
+        risk_level = "CRITICAL"
+        risk_color = "red"
+        delta = f"↑ {peak_demand - CAPACITY_THRESHOLD:,.2f} MW above Capacity"
+    elif peak_demand > shortage_threshold:
+        risk_level = "HIGH"
+        risk_color = "orange"
+        delta = f"↑ {peak_demand - shortage_threshold:,.2f} MW above 99th Pctl"
+    else:
+        risk_level = "LOW"
+        risk_color = "green"
+        delta = f"↓ {shortage_threshold - peak_demand:,.2f} MW below 99th Pctl"
+        
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="Shortage Risk Score (24H)", 
+            value=risk_level, 
+            delta=f"Peak Time: {peak_time}",
+            delta_color=risk_color if risk_color in ["red", "orange"] else "normal"
+        )
+    with col2:
+        st.metric(
+            label="Peak Predicted Demand (MW)", 
+            value=f"{peak_demand:,.2f}", 
+            delta=delta,
+            delta_color=risk_color
+        )
+    with col3:
+        st.metric(
+            label="Predicted Temperature at Peak (°C)", 
+            value=f"{peak_temp:.1f}°C", 
+            delta=f"Time: {peak_time}", 
+            delta_color="normal"
+        )
+        
+    st.markdown("---")
+    
+    # --- DASHBOARD REFINEMENT: EXPLAINABLE PLOTS ---
+    
+    st.subheader("2. Explainable Forecast Drivers")
+    
+    st.markdown("#### 2.1. Dual-Axis Forecast: Demand vs. Temperature")
+    create_dual_axis_forecast(df_plot, shortage_threshold)
+
+    
+    colA, colB = st.columns(2)
+    
+    with colA:
+        st.markdown("#### 2.2. Historical U-Curve Validation")
+        create_u_curve_plot(data, df_plot)
+        
+    with colB:
+        st.markdown("#### 2.3. Hourly Profile Variance")
+        create_time_of_day_variance_plot(data, df_plot)
+
+
+# Execute the main function
+if __name__ == "__main__":
+    main()
