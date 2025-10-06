@@ -48,6 +48,7 @@ def create_features(df):
     
     if DATE_COL in df.columns:
         if DATE_COL not in df.index.names:
+             # IMPORTANT: Load data with UTC timezone awareness
              df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) 
              df = df.set_index(DATE_COL)
         
@@ -265,7 +266,7 @@ def main():
     temp_forecast_celsius = SCENARIO_MAP[selected_scenario]
     
     
-    # 2. Date Range Calendar Input (New)
+    # 2. Date Range Calendar Input
     full_date_range = future_df.index.normalize().unique()
     
     # Define default period (e.g., last 30 days)
@@ -283,10 +284,11 @@ def main():
     
     # Process selected dates
     if len(selected_dates) == 2:
-        # Convert selected date objects (start of day) to Timestamps
-        start_date_filter = pd.to_datetime(selected_dates[0]).normalize()
-        # End date must include the final hour of the selected day
-        end_date_filter = pd.to_datetime(selected_dates[1]).normalize() + pd.Timedelta(hours=23)
+        # --- FIX APPLIED HERE: Localize to UTC to match the DataFrame's timezone ---
+        # Convert selected date objects (start of day) to Timestamps and localize to UTC
+        start_date_filter = pd.to_datetime(selected_dates[0]).tz_localize('UTC').normalize()
+        # End date must include the final hour of the selected day, and also be UTC-aware
+        end_date_filter = (pd.to_datetime(selected_dates[1]).tz_localize('UTC').normalize() + pd.Timedelta(hours=23))
         
         st.sidebar.info(f"Scenario: **{selected_scenario} ({temp_forecast_celsius:.1f}°C)**\n\nDisplaying: **{start_date_filter.strftime('%b %d')}** to **{end_date_filter.strftime('%b %d')}**")
     else:
@@ -304,7 +306,7 @@ def main():
     future_df[target_col_sanitized] = np.nan
     
     # ----------------------------------------------------------------------
-    # --- FEATURE ENGINEERING (Lag/Rolling) --- (Omitted for brevity, code remains the same)
+    # --- FEATURE ENGINEERING (Lag/Rolling) ---
     # ----------------------------------------------------------------------
     
     last_hist = data.tail(1)
