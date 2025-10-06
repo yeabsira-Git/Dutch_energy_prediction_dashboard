@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt 
+from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -19,13 +20,17 @@ SCENARIO_MAP = {
     "4. Summer (> 25°C)": 30.0      
 }
 
-TIME_OF_DAY_OPTIONS = ['Morning', 'Noon', 'Evening', 'Night', 'Midnight']
+# Use the time periods as the options list
+TIME_OF_DAY_OPTIONS = ['Morning', 'Noon', 'Evening', 'Midnight']
 
 # --- DATA LOADING ---
 
 @st.cache_data
 def load_historical_data():
-    """Loads historical data, calculates temperature in Celsius, and maps scenarios."""
+    """
+    Loads historical data, calculates temperature in Celsius, maps scenarios, 
+    and applies the custom Time-of-Day mapping logic.
+    """
     file_path = 'cleaned_energy_weather_data(1).csv' 
     
     try:
@@ -34,10 +39,31 @@ def load_historical_data():
         st.error("Historical data file 'cleaned_energy_weather_data(1).csv' not found.")
         return pd.DataFrame()
 
+    # Convert DateUTC to datetime and extract the hour (assuming UTC time is used consistently)
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True)
+    df['hour'] = df[DATE_COL].dt.hour
+    
     # Calculate temperature in Celsius
     df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10
     
-    # Mapping function
+    # 1. CUSTOM TIME-OF-DAY MAPPING FUNCTION
+    def map_custom_time_of_day(hour):
+        """Maps the hour (0-23) to the custom time periods."""
+        if 0 <= hour <= 5:  # 0:00 to 5:59
+            return 'Midnight'
+        elif 6 <= hour <= 11:  # 6:00 to 11:59
+            return 'Morning'
+        elif 12 <= hour <= 16:  # 12:00 to 16:59
+            return 'Noon'
+        elif 17 <= hour <= 23:  # 17:00 to 23:59
+            return 'Evening'
+        else:
+            return 'Other'
+            
+    # Apply the custom mapping, overwriting any previous 'Detailed_Time_of_Day' value
+    df['Detailed_Time_of_Day'] = df['hour'].apply(map_custom_time_of_day)
+
+    # 2. SCENARIO MAPPING FUNCTION
     def map_temp_to_scenario(temp):
         """Maps continuous temperature (in Celsius) to one of the four scenarios."""
         if temp <= 10:
@@ -50,14 +76,10 @@ def load_historical_data():
             return '4. Summer (> 25°C)'
             
     df['Scenario'] = df[TEMP_CELSIUS_COL].apply(map_temp_to_scenario)
-    
-    # Ensure Detailed_Time_of_Day is clean and only contains valid options
-    if 'Detailed_Time_of_Day' in df.columns:
-        df['Detailed_Time_of_Day'] = df['Detailed_Time_of_Day'].astype(str).str.strip()
-        df = df[df['Detailed_Time_of_Day'].isin(TIME_OF_DAY_OPTIONS)]
-    else:
-        st.error("Required column 'Detailed_Time_of_Day' is missing.")
 
+    # Filter out any 'Other' periods just in case (e.g., if there were missing hour data)
+    df = df[df['Detailed_Time_of_Day'].isin(TIME_OF_DAY_OPTIONS)]
+    
     return df
 
 # --- PLOTTING FUNCTION ---
@@ -93,7 +115,7 @@ def create_filtered_boxplot(df, selected_time_of_day):
 def main():
     st.set_page_config(layout="wide", page_title="Historical Demand Scenario Visualizer")
     st.title("📊 Historical Energy Demand Scenario Visualizer")
-    st.markdown("Use the controls on the left to analyze how demand changes by temperature scenario during key times of the day.")
+    st.markdown("Use the controls on the left to analyze how demand changes by temperature scenario during key times of the day based on your custom time periods.")
 
     df_historical = load_historical_data()
     
@@ -109,11 +131,11 @@ def main():
     selected_time_of_day = st.sidebar.selectbox(
         "Select Time of Day Period:",
         options=TIME_OF_DAY_OPTIONS,
-        index=2, # Default to Noon, as it's often a peak period
+        index=TIME_OF_DAY_OPTIONS.index('Noon'), # Default to Noon
         help="Select a specific time period to see how demand is distributed across the different temperature scenarios during that time."
     )
     
-    st.sidebar.info(f"Filtering historical data for: **{selected_time_of_day}**")
+    st.sidebar.info(f"Using Custom Period: **{selected_time_of_day}**")
 
     st.markdown("---")
     
@@ -121,13 +143,13 @@ def main():
     # --- DASHBOARD PLOT (The only visualization) ---
     # ----------------------------------------------------------------------
     
-    st.subheader("Demand Distribution by Temperature Scenario")
+    st.subheader(f"Demand Distribution by Temperature Scenario during the {selected_time_of_day} Period")
     
     # Call the filtered plot function
     create_filtered_boxplot(df_historical, selected_time_of_day)
 
     st.markdown("---")
-    st.markdown(f"This focused dashboard provides the granular historical context needed for your project on **early prediction of energy shortages** in Dutch neighborhoods, clearly showing the interplay between temperature and time of day.")
+    st.markdown(f"This focused dashboard provides the granular historical context needed for your project on **early prediction of energy shortages** in Dutch neighborhoods, clearly showing the interplay between temperature and your **custom time-of-day periods**.")
 
 
 # Execute the main function
