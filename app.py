@@ -37,11 +37,17 @@ def sanitize_feature_names(columns):
         new_cols.append(col)
     return new_cols
 
-# Feature Engineering Function (Added Temperature Conversion)
+# Feature Engineering Function (FIXED KEY ERROR)
 @st.cache_data
 def create_features(df):
-    df[DATE_COL] = pd.to_datetime(df[DATE_COL])
-    df = df.set_index(DATE_COL)
+    
+    # --- FIX START ---
+    # Only set the index if the date column exists (used for CSV data loading)
+    # The future_df already has the date in the index, so this step is skipped.
+    if DATE_COL in df.columns:
+        df[DATE_COL] = pd.to_datetime(df[DATE_COL], utc=True) # Added utc=True for safety
+        df = df.set_index(DATE_COL)
+    # --- FIX END ---
     
     # 1. Temporal Features (Crucial for Time-of-Day Analysis)
     df['hour'] = df.index.hour
@@ -218,12 +224,12 @@ def main():
     # --- SIMULATE NEXT 24-HOUR FORECAST ---
     
     # Get the last 24 hours of actual data to use as features for the next 24 hours
-    last_actuals = data[TARGET_COL].tail(24)
+    # Ensure we are using the TARGET_COL after cleaning up the column names
+    target_col_sanitized = sanitize_feature_names([TARGET_COL])[0]
+    
+    last_actuals = data[target_col_sanitized].tail(24)
     
     # --- SIMULATE FUTURE DATA FOR PREDICTION (Mocking future weather) ---
-    
-    # For demonstration, we simulate a cold snap with low temperatures
-    # In a real app, this would be replaced with actual weather forecast data.
     
     # Base future data starting from the last date + 1 hour
     future_start_date = data.index[-1] + pd.Timedelta(hours=1)
@@ -234,25 +240,25 @@ def main():
     future_df = create_features(future_df)
     
     # Mocking Temperature: Simulate a cold snap dropping to -5 C (or -50 in 0.1 degrees) at 6 AM
-    temp_forecast = (np.sin(np.linspace(0, 2 * np.pi, 24)) * 30) + 20 # Sinusoidal temp swing, avg 2C
-    # Shift the sine wave so the low point is around 6 AM (hour 6)
+    
+    # Time-based simulation to create a realistic-looking temperature dip around the morning hours
     temp_shift = (future_df.index.hour - 6) * (2 * np.pi / 24)
     temp_forecast = (np.cos(temp_shift) * 30) + 20
     
     # Ensure temperature in 0.1 degrees
-    future_df[TEMP_COL] = (temp_forecast * 10).astype(int) 
-    future_df[TEMP_CELSIUS_COL] = future_df[TEMP_COL] / 10 # New Celsius column
+    temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
+    future_df[temp_col_sanitized] = (temp_forecast * 10).astype(int) 
+    future_df[TEMP_CELSIUS_COL] = future_df[temp_col_sanitized] / 10 # New Celsius column
     
     # Fill in required dummy/categorical columns with mode of historical data
     for col in CATEGORICAL_COLS:
-        if col in data.columns:
-            future_df[col] = data[col].mode()[0] 
+        col_sanitized = sanitize_feature_names([col])[0]
+        if col_sanitized in data.columns:
+            # We use the sanitized name for the column we create
+            future_df[col_sanitized] = data[col_sanitized].mode()[0] 
 
-    # Sanitize feature names
-    future_df.columns = sanitize_feature_names(future_df.columns)
-    
     # Select features for prediction (must match model's expected features)
-    model_features = [col for col in model.feature_name_ if col in future_df.columns]
+    model_features = [col for col col in model.feature_name_ if col in future_df.columns]
     
     # --- RUN PREDICTION ---
     
@@ -268,7 +274,7 @@ def main():
     st.subheader("1. Core Risk Metrics & Shortage Analysis")
     
     # Calculate Shortage Threshold (99th percentile of historical demand)
-    shortage_threshold = data[TARGET_COL].quantile(0.99)
+    shortage_threshold = data[target_col_sanitized].quantile(0.99)
     
     df_plot = future_df.dropna(subset=[PREDICTION_COL_NAME])
     peak_demand = df_plot[PREDICTION_COL_NAME].max()
