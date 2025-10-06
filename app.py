@@ -8,7 +8,7 @@ import joblib
 import lightgbm as lgb
 warnings.filterwarnings("ignore")
 
-# --- CONFIGURATION (Must match training script) ---
+# --- CONFIGURATION ---
 DATE_COL = 'DateUTC'
 ORIGINAL_TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)'
@@ -16,8 +16,7 @@ TEMP_CELSIUS_COL = 'Temperature_C'
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 PREDICTION_COL_NAME = 'Predicted_Demand' 
 
-# RELATIVE RISK THRESHOLDS - Keeping relevant risk variables for context
-GLOBAL_RISK_THRESHOLD = 15500 # A high statistical peak, used as a fixed red line on the plot
+GLOBAL_RISK_THRESHOLD = 15500 
 
 # --- HELPER FUNCTIONS FOR TEMPERATURE CATEGORIZATION ---
 
@@ -32,48 +31,58 @@ def get_temp_category(temp_c):
     else:
         return 'Summer (Peak Evening > 25°C)'
 
-# --- DATA LOADING AND PREDICTION ---
+# --- DATA LOADING AND PREDICTION (Highly Robust Function) ---
 
 @st.cache_data
 def load_data_and_predict():
     """
-    Loads historical data, engineers features, loads the LightGBM model, 
-    and generates the Predicted_Demand column.
+    Loads data, engineers features, loads the model, and generates predictions.
+    Includes robust data loading to fix persistent parsing errors.
     """
     data_file_path = 'cleaned_energy_weather_data(1).csv' 
     model_file_path = MODEL_FILENAME
     
-    # 1. Load Data
+    # 1. Load Data with Robust Delimiter/Encoding Checks (The FIX)
+    df = None
     try:
-        # FIX: Explicitly set the separator to comma (',') 
-        df = pd.read_csv(data_file_path, parse_dates=[DATE_COL], encoding='latin1', sep=',')
+        # Attempt 1: Standard CSV (comma) with UTF-8
+        df = pd.read_csv(
+            data_file_path, parse_dates=[DATE_COL], encoding='utf-8', sep=',', skiprows=0, skip_blank_lines=True
+        )
+    except (pd.errors.ParserError, UnicodeDecodeError):
+        try:
+            # Attempt 2: European CSV (semicolon) with latin1
+            df = pd.read_csv(
+                data_file_path, parse_dates=[DATE_COL], encoding='latin1', sep=';', skiprows=0, skip_blank_lines=True
+            )
+        except Exception as e:
+            st.error(f"FATAL DATA ERROR: Could not load data. Tried comma (UTF-8) and semicolon (Latin-1). Please verify your CSV file structure. (Error: {e})")
+            st.stop()
     except Exception as e:
-        st.error(f"FATAL DATA ERROR: Could not load data. Check file format or separator (Error: {e}).")
-        st.stop()
+         st.error(f"FATAL DATA ERROR: Unexpected error during data load: {e}")
+         st.stop()
     
     # 2. Load Model
     try:
         model = joblib.load(model_file_path)
     except Exception as e:
-        st.error(f"FATAL MODEL ERROR: Could not load model '{MODEL_FILENAME}'. Ensure file exists and is correct (Error: {e}).")
+        st.error(f"FATAL MODEL ERROR: Could not load model '{MODEL_FILENAME}'. Ensure file exists. (Error: {e})")
         st.stop()
     
-    # Ensure DateUTC is timezone-aware and clean up data
+    # 3. Feature Engineering (Must create ALL features the model expects)
     if df[DATE_COL].dt.tz is None:
         df[DATE_COL] = df[DATE_COL].dt.tz_localize('UTC')
-    
-    # 3. Feature Engineering (Must create ALL features the model expects)
+        
     df[TEMP_CELSIUS_COL] = df[TEMP_COL] / 10.0
     
-    # Time Features
+    # Temporal Features
     df['hour'] = df[DATE_COL].dt.hour
     df['dayofweek'] = df[DATE_COL].dt.dayofweek
     df['is_weekend'] = df['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
     df['month'] = df[DATE_COL].dt.month
     df['quarter'] = df[DATE_COL].dt.quarter
     
-    # Lag and Rolling Features (CRITICAL for prediction)
-    # The list below covers common time-series features.
+    # Lag and Rolling Features (Assumed features needed by the model)
     df['Demand_MW_lag24'] = df[ORIGINAL_TARGET_COL].shift(24)
     df['Demand_MW_lag48'] = df[ORIGINAL_TARGET_COL].shift(48)
     df['Demand_MW_roll72'] = df[ORIGINAL_TARGET_COL].shift(1).rolling(window=72).mean()
@@ -81,34 +90,18 @@ def load_data_and_predict():
     df['temp_roll72'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=72).mean()
     df['temp_roll168'] = df[TEMP_CELSIUS_COL].shift(1).rolling(window=168).mean()
     
-    # Add other weather columns likely used by the model (based on snippet)
-    # If the model uses them, we must ensure they are clean/present.
-    weather_cols = [
-        'Wind Direction (degrees)', 'Hourly Mean Wind Speed (0.1 m/s)', 
-        'Dew Point Temperature (0.1 degrees Celsius)', 'Sunshine Duration (0.1 hours)',
-        'Relative Atmospheric Humidity (%)', 'Air Pressure (0.1 hPa)', 
-        'Cloud Cover (octants)', 'Horizontal Visibility',
-        'Time_of_Day', 'Detailed_Time_of_Day', 
-        # Add the renamed temperature column back in for completeness
-        TEMP_CELSIUS_COL 
-    ]
-    # Ensure all listed weather columns exist and fill NaNs if necessary for prediction
-    for col in weather_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(df[col].mean())
-    
-    # 4. Filter for rows where prediction is possible
-    # Drop NaNs that resulted from creating the lag/roll features
-    df_predict = df.copy().dropna(subset=model.feature_name_)
-
-    # 5. Predict (The FIX for the LightGBMError is here: enforce feature order)
+    # Fill NaNs for weather columns needed for prediction
     model_features = model.feature_name_
     
-    # Select features in the exact order the model expects
+    # 4. Filter for rows where prediction is possible
+    # Drop rows where any of the required model features (including lags) are NaN
+    df_predict = df.copy().dropna(subset=model_features, how='any')
+
+    # 5. Predict (Strictly enforce feature order - FIX for LightGBMError)
     X_predict = df_predict[model_features] 
     y_pred = model.predict(X_predict)
     
-    # 6. Merge prediction back to original dataframe
+    # 6. Merge prediction back
     df[PREDICTION_COL_NAME] = np.nan
     df.loc[df_predict.index, PREDICTION_COL_NAME] = y_pred
     
@@ -117,7 +110,7 @@ def load_data_and_predict():
 
     return df
 
-# --- REST OF THE STREAMLIT APP REMAINS THE SAME ---
+# --- VISUALIZATION FUNCTIONS ---
 
 def create_demand_forecast_plot(df: pd.DataFrame):
     """Creates the standard time-series demand and forecast plot (Demand vs Time)."""
@@ -156,10 +149,7 @@ def create_demand_forecast_plot(df: pd.DataFrame):
 def create_hourly_profile_plot(df: pd.DataFrame):
     """Creates a plot of demand vs. hour of day (Time of Day and Demand)."""
     
-    # Group by hour and temperature category to show the average predicted demand profile
     df_hourly = df.groupby(['hour', 'Weather_Category'])[PREDICTION_COL_NAME].mean().reset_index(name='Avg Predicted Demand (MW)')
-    
-    # Determine the overall dominant category for the title
     dominant_category = df['Weather_Category'].mode().iloc[0].split('(')[1].replace(')', '').strip()
     
     chart = alt.Chart(df_hourly).mark_line(point=True).encode(
@@ -175,15 +165,18 @@ def create_hourly_profile_plot(df: pd.DataFrame):
 
 def display_summary_kpis(df: pd.DataFrame):
     """Displays the predicted peak and low demand for the period."""
-    if df[PREDICTION_COL_NAME].empty:
+    if df[PREDICTION_COL_NAME].empty or df[PREDICTION_COL_NAME].isnull().all():
         st.warning("No predictions available for the selected range.")
         return
         
     predicted_peak = df[PREDICTION_COL_NAME].max()
     predicted_low = df[PREDICTION_COL_NAME].min()
     
-    peak_time = df.loc[df[PREDICTION_COL_NAME].idxmax(), DATE_COL].strftime('%Y-%m-%d %H:%M UTC')
-    low_time = df.loc[df[PREDICTION_COL_NAME].idxmin(), DATE_COL].strftime('%Y-%m-%d %H:%M UTC')
+    peak_time_index = df[PREDICTION_COL_NAME].idxmax()
+    low_time_index = df[PREDICTION_COL_NAME].idxmin()
+    
+    peak_time = df.loc[peak_time_index, DATE_COL].strftime('%Y-%m-%d %H:%M UTC')
+    low_time = df.loc[low_time_index, DATE_COL].strftime('%Y-%m-%d %H:%M UTC')
     
     st.subheader("2. Predicted Demand Peak & Low 🎯")
     col1, col2 = st.columns(2)
@@ -232,8 +225,6 @@ def main():
     forecast_days = (selected_date_range[1] - selected_date_range[0]).days
     st.sidebar.metric("Selected Forecast Horizon", f"{forecast_days} days")
     
-    # Convert selected dates back to timezone-aware datetimes for filtering
-    # NOTE: The tz_localize ensures the comparison works even if the data doesn't have an explicit TZ in the CSV
     tz_info = df_full[DATE_COL].dt.tz
     start_dt = datetime.combine(selected_date_range[0], datetime.min.time()).replace(tzinfo=tz_info)
     end_dt = datetime.combine(selected_date_range[1], datetime.max.time()).replace(tzinfo=tz_info)
@@ -261,12 +252,11 @@ def main():
 
     st.markdown("---")
     
-    # FEATURE 3: Demand vs Time of Day (Hourly Profile reflecting EDA findings)
+    # FEATURE 3: Demand vs Time of Day (Hourly Profile reflecting peak shift)
     st.subheader("4. Hourly Demand Profile: Visualizing Temperature-Based Peak Shift 🌡️")
     st.markdown("""
-        This plot shows the **average predicted demand profile by hour (0-23)** for the selected period.
-        It directly illustrates the shift identified in the EDA: 
-        Peak demand is expected at **Noon** for Cold/Mild weather and in the **Evening** for Warm/Summer weather.
+        This plot shows the **average predicted demand profile by hour (0-23)** for the selected period,
+        highlighting the shift in peak demand (Noon for Cold/Mild vs. Evening for Warm/Summer).
     """)
     create_hourly_profile_plot(df_filtered)
 
