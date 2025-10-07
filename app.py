@@ -271,7 +271,7 @@ st.set_page_config(
 )
 
 st.title("💡  Peak Energy Demand Prediction Dashboard")
-st.markdown("Forecasting hourly energy demand in Dutch neighborhoods using LightGBM.")
+st.markdown("Forecasting hourly energy demand in The Netherlands using LightGBM.")
 
 # Initialize session state for caching results
 if 'forecast_data' not in st.session_state:
