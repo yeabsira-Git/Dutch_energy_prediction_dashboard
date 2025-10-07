@@ -270,7 +270,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("💡 Early Energy Shortage Prediction Dashboard")
+st.title("💡  Peak Energy Demand Prediction Dashboard")
 st.markdown("Forecasting hourly energy demand in Dutch neighborhoods using LightGBM.")
 
 # Initialize session state for caching results
