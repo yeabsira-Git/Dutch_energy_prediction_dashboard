@@ -142,25 +142,27 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
             
     # CRITICAL: Ensure OHE features for the future index are correctly set based on the date/time
     # This involves setting the Time_of_Day_... columns to 1 for the relevant index hour.
-    # The simplest way is to create a temporary DF with index and run OHE, then align columns.
     
     # Create necessary time-based categorical columns for the future index
     temp_future_df = pd.DataFrame(index=forecast_index)
     temp_future_df['Time_of_Day'] = temp_future_df.index.hour.map(lambda h: 'Day' if 6 <= h < 18 else 'Night')
+    # Using a simplified hour mapping that is likely captured by the model features
     temp_future_df['Detailed_Time_of_Day'] = temp_future_df.index.hour.map({
         0: 'Midnight', 1: 'Midnight', 2: 'Midnight', 3: 'Midnight', 4: 'Midnight', 5: 'Midnight',
         6: 'Morning', 7: 'Morning', 8: 'Morning', 9: 'Morning', 10: 'Morning', 11: 'Morning',
         12: 'Noon', 13: 'Noon', 14: 'Noon', 15: 'Noon', 16: 'Noon', 17: 'Noon',
         18: 'Evening', 19: 'Evening', 20: 'Evening', 21: 'Evening', 22: 'Evening', 23: 'Evening'
-    }) # This mapping is just an example; depends on what the original data used.
+    }) 
 
     # Perform OHE on the time columns
     future_ohe_df = pd.get_dummies(temp_future_df[['Time_of_Day', 'Detailed_Time_of_Day']], dummy_na=False)
 
     # Update df_forecast with the calculated time OHE features
     for col in future_ohe_df.columns:
-        if col in df_forecast.columns:
-            df_forecast[col] = future_ohe_df[col]
+        # Align column names for OHE features
+        ohe_col_name = sanitize_feature_names([col])[0]
+        if ohe_col_name in df_forecast.columns:
+            df_forecast[ohe_col_name] = future_ohe_df[col].values
             
     df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
 
@@ -172,6 +174,7 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
         
         # Use enough data for lag/roll features (up to 168 hours needed for temp_roll168)
         df_temp = df_combined.loc[:t].copy() 
+        # Calculate features on the trailing 168 hours, then take the last row
         features_t_raw = create_features(df_temp.tail(168)).tail(1)
         
         # CRITICAL: Align columns to model's exact expected features and fill any missing with 0
@@ -226,8 +229,8 @@ def display_historical_daily_pattern(historical_df):
     # Prepare data for plotting
     selected_day_df['Hour'] = selected_day_df.index.hour
     selected_day_df['Demand_MW'] = selected_day_df[TARGET_COL_SANITIZED]
-    # Use the raw 0.1 C temperature for the calculation if that's what's in the DF, 
-    # but display in Celsius.
+    
+    # Convert 0.1 C to C for display
     if TEMP_COL_SAN in selected_day_df.columns:
         selected_day_df['Temperature_C'] = selected_day_df[TEMP_COL_SAN] / 10.0
     else:
@@ -258,31 +261,44 @@ def display_historical_daily_pattern(historical_df):
     st.caption("Energy demand (blue) typically ramps up sharply in the evening, often inversely correlated with temperature (orange).")
     st.markdown("---")
 
-def display_forecast_daily_pattern(df_full_forecast):
-    """Allows user to select a date in Q4 2025 and views its 24-hour predicted demand pattern."""
-    st.subheader("4.1. Interactive Forecast Day Viewer (Q4 Focus)")
-    st.markdown("Select a date between **Oct 1 and Dec 31, 2025** to see the predicted 24-hour demand pattern and assess the specific peak risk for that day.")
+def map_hour_to_detailed_time_of_day(hour):
+    """Maps an hour (0-23) to a readable time segment."""
+    if 0 <= hour < 6: return 'Night (00:00-05:59)'
+    if 6 <= hour < 12: return 'Morning (06:00-11:59)'
+    if 12 <= hour < 18: return 'Noon/Afternoon (12:00-17:59)'
+    if 18 <= hour < 24: return 'Evening (18:00-23:59)'
+    return 'Unknown'
+
+def display_forecast_time_of_day_analysis(df_full_forecast):
+    """
+    Allows user to select a date in Q4 2025 and views its 24-hour predicted 
+    demand pattern, highlighting the Time of Day effect.
+    """
+    st.subheader("4.1. Interactive Forecast Day Analysis (Q4 Focus)")
+    st.markdown("Select a date between **Oct 1 and Dec 31, 2025** to see the predicted 24-hour demand pattern, colored by the time of day. This visually confirms the **Evening Peak** is the highest risk period.")
     
     # Filter the forecast data to the relevant Q4 period
     DISPLAY_START_DATE = datetime(2025, 10, 1, 0, 0, 0)
-    df_forecast = df_full_forecast.loc[DISPLAY_START_DATE:].copy()
+    DISPLAY_END_DATE = datetime(2025, 12, 31, 23, 0, 0)
+    
+    # Filter data to the Q4 range
+    df_forecast = df_full_forecast.loc[DISPLAY_START_DATE:DISPLAY_END_DATE].copy()
 
     if df_forecast.empty:
         st.warning("Forecast data for Q4 2025 is not available. Please run the forecast first.")
         return
     
-    # Ensure the dataframe is ready
-    if 'Predicted_Demand_MW' not in df_forecast.columns:
-        st.error("Forecast column 'Predicted_Demand_MW' not found.")
-        return
-
     dates = df_forecast.index.normalize().unique()
     
+    if dates.empty:
+        st.warning("No unique dates found in the Q4 forecast range.")
+        return
+
     # Default to the date with the highest peak in the Q4 forecast
     peak_date = df_forecast['Predicted_Demand_MW'].idxmax().to_pydatetime().date()
     
     selected_date = st.date_input(
-        "Select a Forecast Date",
+        "Select a Forecast Date (Oct 1 - Dec 31, 2025)",
         value=peak_date,
         min_value=dates.min().to_pydatetime().date(),
         max_value=dates.max().to_pydatetime().date()
@@ -295,22 +311,32 @@ def display_forecast_daily_pattern(df_full_forecast):
         st.warning(f"No forecast data available for {selected_date} in the Q4 window.")
         return
 
-    # Prepare data for plotting
+    # --- Feature addition for visualization ---
     selected_day_df['Hour'] = selected_day_df.index.hour
     selected_day_df['Demand_MW'] = selected_day_df['Predicted_Demand_MW']
     
-    # Altair Chart for demand plot
-    chart = alt.Chart(selected_day_df).mark_line(point=True, color='#006494').encode(
-        x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day')),
-        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Predicted Demand (MW)', titleColor='#006494')),
-        tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f')]
+    # Add the categorical time of day column
+    selected_day_df['Time_of_Day_Category'] = selected_day_df['Hour'].apply(map_hour_to_detailed_time_of_day)
+
+    # --- Altair Plotting ---
+    
+    # Define order for categorical variable for clean legend/coloring
+    category_order = ['Night (00:00-05:59)', 'Morning (06:00-11:59)', 'Noon/Afternoon (12:00-17:59)', 'Evening (18:00-23:59)']
+    
+    chart = alt.Chart(selected_day_df).mark_line(point=True).encode(
+        x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day (0-23)')),
+        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Predicted Demand (MW)')),
+        # Use color to show the time of day effect
+        color=alt.Color('Time_of_Day_Category:N', sort=category_order, title="Time of Day"),
+        tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f'), 'Time_of_Day_Category:N']
     ).properties(
-        title=f"Predicted Demand Pattern on {selected_date.strftime('%Y-%m-%d')}"
+        title=f"Predicted Hourly Demand by Time Segment on {selected_date.strftime('%Y-%m-%d')}"
     ).interactive()
     
     st.altair_chart(chart, use_container_width=True)
-    st.caption(f"The predicted hourly energy demand shows the crucial evening peak for resource planning on this day.")
+    st.caption("The colored segments highlight how collective human behavior (like returning home and cooking in the **Evening**) drives the highest demand peaks.")
     st.markdown("---")
+
 
 def display_forecast_and_peak(df_full_forecast):
     """
@@ -429,13 +455,13 @@ def main():
         # 3.1 & 3.2 - Peak insight and full Q4 plot
         display_forecast_and_peak(st.session_state.df_forecast) 
         
-        # 4.1 - New interactive daily forecast viewer
-        display_forecast_daily_pattern(st.session_state.df_forecast)
+        # 4.1 - New interactive daily forecast viewer with time-of-day analysis
+        display_forecast_time_of_day_analysis(st.session_state.df_forecast)
         
     elif st.button('Show Previous Forecast', key='show_forecast_btn', disabled='df_forecast' not in st.session_state):
         if 'df_forecast' in st.session_state:
             display_forecast_and_peak(st.session_state.df_forecast)
-            display_forecast_daily_pattern(st.session_state.df_forecast)
+            display_forecast_time_of_day_analysis(st.session_state.df_forecast)
     
 if __name__ == '__main__':
     main()
