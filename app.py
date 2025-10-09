@@ -360,8 +360,8 @@ def display_daily_forecast_chart(selected_day_df, selected_date):
 
 def main():
     st.set_page_config(layout="wide")
-    st.title("💡 Predictive Energy Demand Risk Platform")
-    st.markdown("#### Daily forecast for Electricity Demand peaks of The Netherlands")
+    st.title("💡 Predictive Dutch Energy Demand Platform: Peak Alert System")
+    #st.markdown("#### Daily forecast for Electricity Demand peaks of The Netherlands")
 
     # Load resources
     historical_df = load_data('cleaned_energy_weather_data(1).csv')
