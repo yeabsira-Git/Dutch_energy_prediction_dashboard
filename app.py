@@ -42,9 +42,6 @@ def sanitize_feature_names(columns):
 def create_features(df):
     """
     Creates all time-based, lag, and rolling window features expected by the model.
-    NOTE: This function is now primarily used for historical data and to define 
-    the logic, but the recursive loop will implement the demand-based features 
-    manually for performance.
     """
     
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
@@ -58,12 +55,10 @@ def create_features(df):
     df['dayofyear'] = df.index.dayofyear
     df['dayofmonth'] = df.index.day
     df['weekofyear'] = df.index.isocalendar().week.astype(int)
-    # Reconstructed feature from the error message
     df['is_weekend'] = df.index.dayofweek.isin([5, 6]).astype(int) 
     
-    # 2. Demand Lag and Rolling Features (Only computed correctly when historical data is available)
+    # 2. Demand Lag and Rolling Features (Used for historical calculation only)
     if TARGET_COL_SANITIZED in df.columns:
-        # Note: These are heavy operations, which is why we avoid them in the recursive loop
         df['Demand_MW_lag24'] = df[TARGET_COL_SANITIZED].shift(24)
         df['Demand_MW_lag48'] = df[TARGET_COL_SANITIZED].shift(48)
         df['Demand_MW_roll72'] = df[TARGET_COL_SANITIZED].shift(24).rolling(window=72).mean()
@@ -90,9 +85,6 @@ def load_data(file_path):
         df.columns = sanitize_feature_names(df.columns)
         df = df.resample('H').first()
         
-        # NOTE: We keep Time_of_Day and Detailed_Time_of_Day for OHE, but they might be missing/NaN in the forecast section
-        # We need to impute or handle them before OHE if they are NaN in the future.
-        
         df = pd.get_dummies(df, columns=CATEGORICAL_COLS, dummy_na=False)
         # Only drop rows where the historical target is missing (i.e., train on complete data)
         df = df.dropna(subset=[TARGET_COL_SANITIZED]) 
@@ -113,7 +105,7 @@ def load_model(file_path):
         st.error(f"Error loading model: {e}")
         return None
 
-# --- 3. RECURSIVE FORECASTING CORE LOGIC (OPTIMIZED) ---
+# --- 3. RECURSIVE FORECASTING CORE LOGIC (OPTIMIZED & FIXED) ---
 
 def _run_recursive_forecast_core(historical_df, model, forecast_steps):
     """
@@ -126,9 +118,6 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
                                      periods=forecast_steps, 
                                      freq='H')
 
-    # Get the feature columns that are NOT demand-dependent (time, weather, OHE)
-    # The historical_df here *already* has OHE, but the forecast section needs it generated.
-    
     # 1. Setup future DataFrame and pre-calculate STATIC features
     df_forecast = pd.DataFrame(index=forecast_index)
     
@@ -140,9 +129,10 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
         if col in historical_df.columns:
             historical_slice = historical_df[col].iloc[-168:]
             tiled_data = np.tile(historical_slice.values, (forecast_steps // 168) + 1)[:forecast_steps]
-            df_forecast[col] = tiled_data
+            # Ensure the tiled data is a float type before assigning
+            df_forecast[col] = tiled_data.astype(np.float64) 
         else:
-            df_forecast[col] = 0 # Default for missing OHE columns
+            df_forecast[col] = 0.0 # Default for missing OHE columns
             
     df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
 
@@ -180,12 +170,17 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
         try:
             # Align features with the model's expectation
             X_t = X_t.reindex(columns=model_feature_names, fill_value=0)
+            
+            # --- CRITICAL FIX: Ensure all columns are standard numeric types (float) ---
+            # This solves the LightGBM ValueError for unsupported pandas dtypes.
+            X_t_numeric = X_t.astype(np.float64)
+            
         except Exception as e:
             st.error(f"Failed to align features for prediction: {e}")
             return pd.DataFrame()
 
         # Predict and update the combined DataFrame for the next iteration
-        pred_t = model.predict(X_t)[0]
+        pred_t = model.predict(X_t_numeric)[0]
         df_combined.loc[t, TARGET_COL_SANITIZED] = pred_t
 
     # Final forecast is the predicted portion of the combined DataFrame
