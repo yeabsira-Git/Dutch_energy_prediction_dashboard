@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import re
-from datetime import datetime, timedelta, time # Import time for easier date manipulation
+from datetime import datetime, timedelta, time
 import lightgbm as lgb
 import altair as alt
 from sklearn.metrics import mean_squared_error
@@ -15,399 +15,290 @@ DATE_COL = 'DateUTC'
 TARGET_COL = 'Demand_MW'
 TEMP_COL = 'Temperature (0.1 degrees Celsius)'
 MODEL_FILENAME = 'lightgbm_demand_model.joblib'
+DATA_FILENAME = 'cleaned_energy_weather_data(1).csv'
 
 # List of categorical columns from the original dataset
 CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
 TARGET_COL_SANITIZED = 'Demand_MW' 
 
 # Define prediction limits
-FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1)
-FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31, 23, 0, 0) # Inclusive end time
+FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1).date() # Changed to .date() for st.date_input
+FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31).date() # Changed to .date()
 
-# --- 1. UTILITY FUNCTIONS (Feature Engineering & Sanitization) ---
+# --- 1. CACHING FUNCTIONS (To solve the 2-minute delay) ---
+
+# Use st.cache_data for functions that return data frames/objects
+@st.cache_data
+def load_and_prepare_data(filepath, date_col):
+    """Loads and preprocesses data, caching the result to run only once."""
+    st.info("⏳ Initial data loading and processing... This happens only once.")
+    try:
+        # Load the data (The slow step)
+        df = pd.read_csv(filepath)
+        
+        # Ensure date column is datetime and drop duplicates/NaNs
+        df[date_col] = pd.to_datetime(df[date_col])
+        df = df.dropna(subset=[TARGET_COL, TEMP_COL, 'Time_of_Day']).drop_duplicates()
+        
+        # Keep only the features needed for prediction
+        feature_cols = [col for col in df.columns if col not in CATEGORICAL_COLS + [TARGET_COL, 'index']]
+        df = df[[DATE_COL, TARGET_COL] + feature_cols + ['Time_of_Day', 'Detailed_Time_of_Day']].set_index(DATE_COL)
+        
+        st.success("Data loaded and ready!")
+        return df
+    except FileNotFoundError:
+        st.error(f"Error: Data file {filepath} not found.")
+        return pd.DataFrame()
+
+# Use st.cache_resource for objects that should persist, like ML models
+@st.cache_resource
+def load_model(filepath):
+    """Loads the pre-trained LightGBM model, caching the result to run only once."""
+    st.info("⏳ Loading the LightGBM model... This happens only once.")
+    try:
+        model = joblib.load(filepath)
+        st.success("Model loaded successfully!")
+        return model
+    except FileNotFoundError:
+        st.error(f"Error: Model file {filepath} not found.")
+        return None
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        return None
+
+# --- 2. UTILITY FUNCTIONS (Feature Engineering & Sanitization) ---
 
 def sanitize_feature_names(columns):
     """Helper function to sanitize column names for consistency."""
     new_cols = []
     for col in columns:
         col = str(col)
-        # Remove special characters and replace with underscore
         col = re.sub(r'[^A-Za-z0-9_]+', '_', col)
-        # Clean up leading/trailing/multiple underscores
         col = re.sub(r'^_+|_+$', '', col)
-        col = re.sub(r'_{2,}', '_', col)
+        col = re.sub(r'_+', '_', col)
         new_cols.append(col)
     return new_cols
 
-def create_features(df):
-    """
-    Creates all time-based, lag, and rolling window features expected by the model.
-    This function must be consistent with the features generated during training.
-    """
-    
-    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
-    
-    # 1. Time Features (Essential for both historical and forecast data)
+def create_time_features(df):
+    """Creates time-based features required by the LightGBM model."""
     df['hour'] = df.index.hour
     df['dayofweek'] = df.index.dayofweek
-    df['quarter'] = df.index.quarter
+    df['dayofyear'] = df.index.dayofyear
+    df['weekofyear'] = df.index.isocalendar().week.astype(int)
     df['month'] = df.index.month
     df['year'] = df.index.year
-    df['dayofyear'] = df.index.dayofyear
-    df['dayofmonth'] = df.index.day
-    df['weekofyear'] = df.index.isocalendar().week.astype(int)
-    # Reconstructed feature from the error message
-    df['is_weekend'] = df.index.dayofweek.isin([5, 6]).astype(int) 
+    df['quarter'] = df.index.quarter
     
-    # 2. Demand Lag and Rolling Features
-    if TARGET_COL_SANITIZED in df.columns:
-        df['Demand_MW_lag24'] = df[TARGET_COL_SANITIZED].shift(24)
-        df['Demand_MW_lag48'] = df[TARGET_COL_SANITIZED].shift(48)
-        df['Demand_MW_roll72'] = df[TARGET_COL_SANITIZED].shift(24).rolling(window=72).mean()
-
-    # 3. Temperature Lag and Rolling Features (Reconstructed from error list)
-    if TEMP_COL_SAN in df.columns:
-        df['temp_lag24'] = df[TEMP_COL_SAN].shift(24)
-        df['temp_roll72'] = df[TEMP_COL_SAN].shift(24).rolling(window=72).mean()
-        df['temp_roll168'] = df[TEMP_COL_SAN].shift(24).rolling(window=168).mean()
-        
-    # Return all generated columns (minus the target itself)
-    feature_cols = [col for col in df.columns if col != TARGET_COL_SANITIZED]
-    return df[feature_cols]
-
-# --- 2. CACHING AND LOADING ---
-
-@st.cache_data(show_spinner="Loading and aligning historical data...")
-def load_data(file_path):
-    """
-    Loads, sanitizes all columns, applies one-hot encoding, and prepares historical data.
-    """
-    try:
-        df = pd.read_csv(file_path, parse_dates=[DATE_COL], index_col=DATE_COL)
-        df.columns = sanitize_feature_names(df.columns)
-        df = df.resample('H').first()
-        df = pd.get_dummies(df, columns=CATEGORICAL_COLS, dummy_na=False)
-        df = df.dropna(subset=[TARGET_COL_SANITIZED])
-        df = df.iloc[168:] 
-        return df
-    except Exception as e:
-        st.error(f"Error loading or processing data. Ensure 'cleaned_energy_weather_data(1).csv' is correctly formatted: {e}")
-        return pd.DataFrame()
-
-@st.cache_resource
-def load_model(file_path):
-    """Loads the pre-trained LightGBM model."""
-    try:
-        model = joblib.load(file_path)
-        return model
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None
-
-# --- 3. RECURSIVE FORECASTING CORE LOGIC ---
-
-def _run_recursive_forecast_core(historical_df, model, forecast_steps):
-    """
-    Core function that runs a step-by-step recursive forecast.
-    It predicts the full path required, including any gap between
-    the historical end and the desired forecast period.
-    """
+    # Example for sine/cosine features (often used for time cyclicity)
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
     
-    last_known_time = historical_df.index[-1]
-    forecast_index = pd.date_range(start=last_known_time + timedelta(hours=1), 
-                                   periods=forecast_steps, 
-                                   freq='H')
+    return df
 
-    # Get the static/weather columns from the historical data
-    static_weather_cols = [col for col in historical_df.columns if col != TARGET_COL_SANITIZED]
-    
-    # 1. Setup future DataFrame by tiling recent historical weather data (168h cycle)
-    df_forecast = pd.DataFrame(index=forecast_index)
-    
-    for col in static_weather_cols:
-        if col in historical_df.columns:
-            historical_slice = historical_df[col].iloc[-168:]
-            tiled_data = np.tile(historical_slice.values, (forecast_steps // 168) + 1)[:forecast_steps]
-            df_forecast[col] = tiled_data
-        else:
-            df_forecast[col] = 0 
-            
-    # CRITICAL: Ensure OHE features for the future index are correctly set based on the date/time
-    temp_future_df = pd.DataFrame(index=forecast_index)
-    temp_future_df['Time_of_Day'] = temp_future_df.index.hour.map(lambda h: 'Day' if 6 <= h < 18 else 'Night')
-    temp_future_df['Detailed_Time_of_Day'] = temp_future_df.index.hour.map({
-        0: 'Midnight', 1: 'Midnight', 2: 'Midnight', 3: 'Midnight', 4: 'Midnight', 5: 'Midnight',
-        6: 'Morning', 7: 'Morning', 8: 'Morning', 9: 'Morning', 10: 'Morning', 11: 'Morning',
-        12: 'Noon', 13: 'Noon', 14: 'Noon', 15: 'Noon', 16: 'Noon', 17: 'Noon',
-        18: 'Evening', 19: 'Evening', 20: 'Evening', 21: 'Evening', 22: 'Evening', 23: 'Evening'
-    }) 
-
-    future_ohe_df = pd.get_dummies(temp_future_df[['Time_of_Day', 'Detailed_Time_of_Day']], dummy_na=False)
-
-    for col in future_ohe_df.columns:
-        ohe_col_name = sanitize_feature_names([col])[0]
-        if ohe_col_name in df_forecast.columns:
-            df_forecast[ohe_col_name] = future_ohe_df[col].values
-            
-    df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
-
-    # Combine historical and future data
-    df_combined = pd.concat([historical_df, df_forecast])
-    
-    # 2. Perform Recursive Loop
-    for t in forecast_index:
-        df_temp = df_combined.loc[:t].copy() 
-        features_t_raw = create_features(df_temp.tail(168)).tail(1)
-        
-        try:
-            X_t = features_t_raw.reindex(columns=model.feature_name_, fill_value=0)
-        except Exception as e:
-            st.error(f"Failed to align features for prediction: {e}")
-            return pd.DataFrame()
-
-        pred_t = model.predict(X_t)[0]
-        df_combined.loc[t, TARGET_COL_SANITIZED] = pred_t
-
-    # Final forecast is the predicted portion of the combined DataFrame
-    final_forecast_df = df_combined.loc[forecast_index].rename(
-        columns={TARGET_COL_SANITIZED: 'Predicted_Demand_MW'}
-    )
-    
-    return final_forecast_df
-
-# --- 4. DAILY FORECAST EXECUTION ---
-
-def run_daily_forecast(historical_df, model, target_date):
-    """
-    Performs a recursive forecast from the last historical point up to the end of the target_date,
-    and returns only the 24 hours of the target_date.
-    """
-    
-    last_known_time = historical_df.index[-1]
-    
-    # Target period: 00:00 on target_date to 23:00 on target_date (24 hours)
-    start_time_of_day = datetime.combine(target_date, time(0, 0))
-    end_time_of_day = datetime.combine(target_date, time(23, 0))
-    
-    if start_time_of_day <= last_known_time:
-        st.warning(f"The date {target_date.strftime('%Y-%m-%d')} is in the historical data. Showing actual data.")
-        return historical_df[historical_df.index.date == target_date].rename(
-            columns={TARGET_COL_SANITIZED: 'Predicted_Demand_MW'}
-        )
-
-    # Calculate the number of hours to predict: from the hour *after* last_known_time up to and including end_time_of_day
-    hours_to_predict = int((end_time_of_day - last_known_time).total_seconds() / 3600)
-
-    if hours_to_predict <= 0:
-         st.error(f"The selected date is too close to the last known data point ({last_known_time.strftime('%Y-%m-%d %H:%M')}). Please select a later date.")
-         return pd.DataFrame()
-         
-    with st.spinner(f"Running recursive forecast for {hours_to_predict} hours up to {target_date.strftime('%Y-%m-%d')}..."):
-        # Run the core recursive logic to predict the entire path (gap + target day)
-        df_full_path = _run_recursive_forecast_core(historical_df, model, hours_to_predict)
-
-    # Filter the result to just the 24 hours of the target_date
-    daily_forecast = df_full_path.loc[start_time_of_day:end_time_of_day]
-    
-    return daily_forecast
-
-
-# --- 5. STREAMLIT APP LAYOUT FUNCTIONS ---
+def map_hour_to_time_of_day(hour):
+    """Maps hour to the Time_of_Day category used in the training data."""
+    if 5 <= hour < 12:
+        return 'Morning'
+    elif 12 <= hour < 17:
+        return 'Afternoon'
+    elif 17 <= hour < 24:
+        return 'Evening'
+    else:
+        return 'Night'
 
 def map_hour_to_detailed_time_of_day(hour):
-    """Maps an hour (0-23) to a readable time segment."""
-    if 0 <= hour < 6: return 'Night (00:00-05:59)'
-    if 6 <= hour < 12: return 'Morning (06:00-11:59)'
-    if 12 <= hour < 18: return 'Noon/Afternoon (12:00-17:59)'
-    if 18 <= hour < 24: return 'Evening (18:00-23:59)'
-    return 'Unknown'
+    """Maps hour to the Detailed_Time_of_Day category (critical for your findings)."""
+    if 5 <= hour < 9: return 'Early Morning'
+    elif 9 <= hour < 12: return 'Late Morning'
+    elif 12 <= hour < 15: return 'Early Afternoon'
+    elif 15 <= hour < 17: return 'Late Afternoon'
+    elif 17 <= hour < 20: return 'Early Evening' # Dinner hour peak area
+    elif 20 <= hour < 24: return 'Late Evening'
+    else: return 'Night'
 
-def display_historical_daily_pattern(historical_df):
-    """Allows user to select a date and views its 24-hour demand and temperature pattern."""
-    st.subheader("1. Interactive Historical Daily Pattern Viewer")
-    st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical  peak.")
-    
-    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
-    
-    dates = historical_df.index.normalize().unique()
-    default_date = dates[-1].to_pydatetime().date()
-    
-    selected_date = st.date_input(
-        "Select a Historical Date",
-        value=default_date,
-        min_value=dates.min().to_pydatetime().date(),
-        max_value=dates.max().to_pydatetime().date(),
-        key='historical_date_picker'
-    )
+# --- 3. PREDICTION FUNCTION ---
 
-    selected_day_df = historical_df[historical_df.index.date == selected_date].copy()
+def predict_24h_demand(target_date, model, df_data, target_col):
+    """Generates features and runs the 24-hour prediction."""
+    try:
+        # Create a 24-hour timestamp index for the target day
+        start_dt = datetime.combine(target_date, time(0, 0))
+        end_dt = start_dt + timedelta(days=1)
+        future_index = pd.date_range(start=start_dt, end=end_dt, freq='H', closed='left')
+        
+        # 1. Extract known weather data for the target day from the full dataset
+        df_target = df_data.loc[future_index].copy()
+        
+        # 2. Add Time Features
+        df_target = create_time_features(df_target)
+        
+        # 3. Add Time_of_Day features (Critical for your model)
+        df_target['Time_of_Day'] = df_target.index.hour.map(map_hour_to_time_of_day)
+        df_target['Detailed_Time_of_Day'] = df_target.index.hour.map(map_hour_to_detailed_time_of_day)
+        
+        # 4. Final Feature Sanitization (must match training features)
+        df_target.columns = sanitize_feature_names(df_target.columns)
+        
+        # 5. Select features used in the trained model
+        # NOTE: This assumes the model features are a subset of the dataframe columns.
+        model_features = model.feature_name() 
+        X_target = df_target[model_features]
+        
+        # 6. Predict
+        predictions = model.predict(X_target)
+        
+        df_result = pd.DataFrame(predictions, index=future_index, columns=[f'Predicted_{target_col}'])
+        
+        # Merge key input columns back for visualization/context
+        df_result['Temperature'] = df_target['Temperature_0_1_degrees_Celsius'] / 10 
+        df_result['Time_of_Day'] = df_target['Time_of_Day']
+        df_result['Detailed_Time_of_Day'] = df_target['Detailed_Time_of_Day']
+        
+        return df_result
     
-    if selected_day_df.empty:
-        st.warning(f"No data available for {selected_date}.")
-        return
+    except KeyError as e:
+        st.error(f"Missing required data for prediction on {target_date.strftime('%Y-%m-%d')}. Check if the date is in your {DATA_FILENAME} forecast range. Missing key: {e}")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred during prediction: {e}")
+        return None
 
-    selected_day_df['Hour'] = selected_day_df.index.hour
-    selected_day_df['Demand_MW'] = selected_day_df[TARGET_COL_SANITIZED]
-    
-    if TEMP_COL_SAN in selected_day_df.columns:
-        selected_day_df['Temperature_C'] = selected_day_df[TEMP_COL_SAN] / 10.0
-    else:
-        selected_day_df['Temperature_C'] = 0 
-    
-    # Altair Charts for dual axis plot
-    base = alt.Chart(selected_day_df).encode(
-        x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day')),
-    )
+# --- 4. DISPLAY FUNCTIONS ---
 
-    demand_chart = base.mark_line(point=True, color='#006494').encode(
-        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Demand (MW)', titleColor='#006494')),
-        tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f')]
+def display_daily_forecast_chart(df_forecast, target_date):
+    """Renders the Altair chart for the 24-hour forecast."""
+    df_plot = df_forecast.reset_index().rename(columns={'index': 'Hour'})
+    
+    # Identify the predicted peak
+    peak_demand = df_plot['Predicted_Demand_MW'].max()
+    
+    # Create the base chart
+    base = alt.Chart(df_plot).encode(
+        x=alt.X('Hour', title='Time of Day', axis=alt.Axis(format='%H:%M'))
     ).properties(
-        title=f"Demand and Temperature on {selected_date.strftime('%Y-%m-%d')}"
+        title=f"24-Hour Energy Demand Forecast: {target_date.strftime('%Y-%m-%d')}"
     )
 
-    temp_chart = base.mark_line(point=True, color='#E9573E').encode(
-        y=alt.Y('Temperature_C:Q', axis=alt.Axis(title='Temperature (°C)', titleColor='#E9573E')),
-        tooltip=['Hour:O', alt.Tooltip('Temperature_C:Q', format='.1f')]
+    # Line chart for demand
+    line = base.mark_line(point=True).encode(
+        y=alt.Y('Predicted_Demand_MW', title='Demand (MW)'),
+        color=alt.value("#005C99"), # Blue for the main line
+        tooltip=['Hour', alt.Tooltip('Predicted_Demand_MW', format=',.0f'), 'Detailed_Time_of_Day']
     )
     
-    final_chart = alt.layer(demand_chart, temp_chart).resolve_scale(
-        y='independent'
-    ).interactive()
+    # Point for the peak demand
+    peak_point = base.mark_circle(size=80, color='red').encode(
+        y='Predicted_Demand_MW',
+        opacity=alt.condition(
+            alt.datum.Predicted_Demand_MW == peak_demand,
+            alt.value(1),
+            alt.value(0)
+        )
+    )
     
-    st.altair_chart(final_chart, use_container_width=True)
-    st.caption("Energy demand (blue) typically ramps up sharply in the evening, often inversely correlated with temperature (orange).")
+    # Text label for the peak
+    peak_label = base.mark_text(
+        align='left',
+        baseline='middle',
+        dx=5, # move text right
+        dy=-10, # move text up
+        color='red'
+    ).encode(
+        y='Predicted_Demand_MW',
+        text=alt.condition(
+            alt.datum.Predicted_Demand_MW == peak_demand,
+            alt.Text('Predicted_Demand_MW', format=',.0f'),
+            alt.value('')
+        )
+    )
+
+    st.altair_chart(line + peak_point + peak_label, use_container_width=True)
+
+def display_daily_peak_summary(df_forecast):
+    """Displays the key summary findings, focusing on the Dinner Hour peak."""
+    peak_row_index = df_forecast['Predicted_Demand_MW'].idxmax()
+    peak_demand = df_forecast.loc[peak_row_index, 'Predicted_Demand_MW']
+    peak_time_interval = f"{peak_row_index.hour:02d}:00 - {peak_row_index.hour+1:02d}:00"
+    peak_category = df_forecast.loc[peak_row_index, 'Detailed_Time_of_Day']
+
     st.markdown("---")
-
-
-def display_daily_peak_summary(selected_day_df, selected_date, prediction_mode=True):
-    """
-    Analyzes the selected day's data (actual or forecast) and extracts the peak demand time and category.
-    """
-    
-    peak_column = 'Predicted_Demand_MW' if prediction_mode else 'Demand_MW'
-    
-    if selected_day_df.empty or peak_column not in selected_day_df.columns:
-        return
-
-    st.subheader(f"4.1. Peak Demand Analysis for {selected_date.strftime('%Y-%m-%d')}")
-    
-    peak_demand_row = selected_day_df[peak_column].idxmax()
-    peak_demand = selected_day_df.loc[peak_demand_row, peak_column]
-    peak_hour = peak_demand_row.hour
-    
-    peak_category = map_hour_to_detailed_time_of_day(peak_hour)
-    peak_time_interval = f"{peak_hour:02d}:00 - {peak_hour+1:02d}:00"
-    
-    is_evening_peak = 'Evening' in peak_category
-    
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Peak Demand (MW)", f"{peak_demand:,.0f}")
+        st.metric(label="Predicted Peak Demand", value=f"{peak_demand:,.0f} MW", delta_color="inverse")
     
     with col2:
-        st.metric("Peak Time Interval", peak_time_interval)
-        
+        st.metric(label="Predicted Peak Hour", value=peak_time_interval)
+
     with col3:
-        # Custom display for the Evening Peak status
-        status_color = '#155724' if is_evening_peak else '#0c5460'
-        bg_color = '#d4edda' if is_evening_peak else '#d1ecf1'
-        border_color = '#c3e6cb' if is_evening_peak else '#bee5eb'
-        
-        st.markdown(f"""
-        <div style="padding: 10px; border-radius: 5px; text-align: center; 
-                    background-color: {bg_color};
-                    border: 1px solid {border_color};">
-            <p style="margin: 0; font-size: 14px; font-weight: 600;">Peak Time Category</p>
-            <h4 style="margin: 5px 0 0; color: {status_color};">{peak_category.split('(')[0].strip()}</h4>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    if is_evening_peak:
-        st.success("**HIGH RISK:** The predicted daily peak is driven by the high-risk **Evening** consumption window. Action is required for this time slot.")
-    else:
-        st.info("The predicted daily peak occurred outside the typical Evening high-risk window, which is often less critical but still requires monitoring.")
-    st.markdown("---")
+        # Highlight the 'Evening' based on your presentation's key finding
+        if 'Evening' in peak_category:
+            st.markdown(f"<p style='color:red; font-size:18px;'>⚠️ **Dinner Hour Peak**</p>", unsafe_allow_html=True)
+            st.metric(label="Time Category", value=peak_category)
+        else:
+            st.metric(label="Time Category", value=peak_category)
+    
+    st.markdown(f"""
+    <p style='font-size: 14px; margin-top: 10px;'>
+    The model predicts the highest demand occurs during the <strong>{peak_category}</strong>,
+    confirming the dominant influence of collective human behavior (like the Dutch dinner hour)
+    on high demand peaks.
+    </p>
+    """, unsafe_allow_html=True)
 
-def display_daily_forecast_chart(selected_day_df, selected_date):
-    """Displays the 24-hour chart for the forecast day."""
-    
-    st.subheader("4. Predicted 24-Hour Demand Pattern")
-    
-    selected_day_df['Hour'] = selected_day_df.index.hour
-    selected_day_df['Demand_MW'] = selected_day_df['Predicted_Demand_MW']
-    
-    # Add the categorical time of day column
-    selected_day_df['Time_of_Day_Category'] = selected_day_df['Hour'].apply(map_hour_to_detailed_time_of_day)
 
-    # Define order for categorical variable for clean legend/coloring
-    category_order = ['Night (00:00-05:59)', 'Morning (06:00-11:59)', 'Noon/Afternoon (12:00-17:59)', 'Evening (18:00-23:59)']
-    
-    chart = alt.Chart(selected_day_df).mark_line(point=True).encode(
-        x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day (0-23)')),
-        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Predicted Demand (MW)')),
-        color=alt.Color('Time_of_Day_Category:N', sort=category_order, title="Time of Day"),
-        tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f'), 'Time_of_Day_Category:N']
-    ).properties(
-        title=f"Predicted Hourly Demand by Time Segment on {selected_date.strftime('%Y-%m-%d')}"
-    ).interactive()
-    
-    st.altair_chart(chart, use_container_width=True)
-    st.caption("The colored segments highlight how collective human behavior drives demand peaks.")
-    
-# --- MAIN EXECUTION ---
+# --- 5. STREAMLIT APP LAYOUT ---
 
 def main():
-    st.set_page_config(layout="wide")
-    st.title("💡 Predictive Dutch Energy Demand Platform: Peak Alert System")
-    #st.markdown("#### Daily forecast for Electricity Demand peaks of The Netherlands")
+    st.set_page_config(layout="wide", page_title="Energy Demand Peak Prediction")
 
-    # Load resources
-    historical_df = load_data('cleaned_energy_weather_data(1).csv')
+    # --- 5.1 Load Cached Resources ---
+    # These functions run ONCE and will be fast on subsequent runs.
+    df_data = load_and_prepare_data(DATA_FILENAME, DATE_COL)
     model = load_model(MODEL_FILENAME)
     
-    if historical_df.empty or model is None:
+    # Check if essential resources are loaded
+    if df_data.empty or model is None:
+        st.warning("Cannot run prediction without data or model. Please check file paths.")
         return
 
-    # 1. Sidebar Info
-    st.sidebar.header("Data & Model Info")
-    st.sidebar.success(f"Historical Data Loaded: {historical_df.shape[0]} records")
-    st.sidebar.success(f"Model Loaded: {model.__class__.__name__}")
-    st.sidebar.info(f"Last Actual Demand Date: {historical_df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+    # --- 5.2 Header and Introduction ---
+    st.title("⚡ Early Prediction of High Demand Peaks (Netherlands)")
+    st.markdown("""
+    This prototype uses a LightGBM model to predict 24-hour energy demand based on weather forecasts and time-based features.
+    The goal is to accurately forecast the **Dinner Hour** peaks caused by collective human behavior.
+    """)
+    st.markdown("---")
     
-    # 2. Display Historical EDA
-    #st.subheader("2. Exploratory Data Analysis (EDA)")
-    display_historical_daily_pattern(historical_df)
+    # --- 5.3 Prediction Input ---
+    st.subheader("1. Select Target Date")
+    
+    # Set the default date to October 12, 2025, for the demo
+    DEMO_DATE_DT = datetime(2025, 10, 12).date() 
 
-    # 3. Daily Forecast Controls and Execution
-    st.subheader("2. Single-Day Peak Forecast")
-    st.info(f"Select a day between **{FORECAST_START_DATE_LIMIT.strftime('%Y-%m-%d')}** and **{FORECAST_END_DATE_LIMIT.strftime('%Y-%m-%d')}** to run a minimal recursive prediction.")
+    target_date = st.date_input(
+        "Select Target Date for 24-Hour Forecast:",
+        min_value=FORECAST_START_DATE_LIMIT,
+        max_value=FORECAST_END_DATE_LIMIT,
+        value=DEMO_DATE_DT 
+    )
 
-    col_date, col_btn = st.columns([0.7, 0.3])
-    
-    with col_date:
-        target_date = st.date_input(
-            "Target Date to Predict (2025)",
-            value=FORECAST_START_DATE_LIMIT.date(),
-            min_value=FORECAST_START_DATE_LIMIT.date(),
-            max_value=FORECAST_END_DATE_LIMIT.date(),
-            key='target_date_picker'
-        )
-    
-    with col_btn:
-        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True) # Spacer
-        if st.button(f'⚡ Run Daily Forecast', key='run_daily_forecast_btn'):
-            # Clear previous result
-            if 'daily_forecast' in st.session_state:
-                del st.session_state.daily_forecast
-            
-            df_forecast = run_daily_forecast(historical_df, model, target_date)
-            
-            if not df_forecast.empty:
+    # --- 5.4 Prediction Execution ---
+    st.subheader("2. Run 24-Hour Forecast")
+
+    if st.button("Generate Forecast", type="primary"):
+        # Check if the date is in the forecast range
+        if target_date < FORECAST_START_DATE_LIMIT or target_date > FORECAST_END_DATE_LIMIT:
+            st.error(f"Selected date is outside the valid forecast range ({FORECAST_START_DATE_LIMIT} to {FORECAST_END_DATE_LIMIT}).")
+        else:
+            # Run the prediction (this is fast because of cached data/model)
+            with st.spinner(f"Predicting demand for {target_date.strftime('%Y-%m-%d')}..."):
+                df_forecast = predict_24h_demand(target_date, model, df_data, TARGET_COL_SANITIZED)
+
+            if df_forecast is not None and not df_forecast.empty:
                 st.session_state.daily_forecast = df_forecast
                 
-                # Instant Peak Alert (to replace JS alert())
+                # Instant Peak Alert
                 peak_row_index = df_forecast['Predicted_Demand_MW'].idxmax()
                 peak_demand = df_forecast.loc[peak_row_index, 'Predicted_Demand_MW']
                 peak_time_interval = f"{peak_row_index.hour:02d}:00 - {peak_row_index.hour+1:02d}:00"
@@ -418,7 +309,7 @@ def main():
                 else:
                     st.toast(f"✅ Prediction complete. Peak of {peak_demand:,.0f} MW at {peak_time_interval} on {target_date.strftime('%Y-%m-%d')}.", icon='💡')
 
-    # 4. Display Daily Forecast Results
+    # --- 5.5 Display Daily Forecast Results ---
     st.subheader("3. Forecast Results")
     
     if 'daily_forecast' in st.session_state and not st.session_state.daily_forecast.empty:
@@ -427,10 +318,15 @@ def main():
         display_daily_forecast_chart(st.session_state.daily_forecast, target_date)
         
         # Display the peak summary and risk warning
-        display_daily_peak_summary(st.session_state.daily_forecast, target_date)
+        display_daily_peak_summary(st.session_state.daily_forecast)
         
     else:
-        st.info("Click 'Run Daily Forecast' above to generate the prediction for a single day.")
-    
-if __name__ == '__main__':
+        st.info("Click 'Generate Forecast' above to see the 24-hour prediction.")
+
+
+if __name__ == "__main__":
+    # Ensure session state is initialized
+    if 'daily_forecast' not in st.session_state:
+        st.session_state.daily_forecast = pd.DataFrame()
+        
     main()
