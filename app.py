@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error
 import warnings
@@ -34,345 +34,141 @@ def sanitize_feature_names(columns):
         new_cols.append(col)
     return new_cols
 
-# Feature Engineering Function
+# Feature Engineering Function - CRITICAL: Must mirror training features
 def create_features(df):
-    # This must be the first step so the temperature column name is correct for subsequent feature creation
-    df.columns = sanitize_feature_names(df.columns) 
+    # Sanitize column names first
+    df.columns = sanitize_feature_names(df.columns)
     
-    df.index = pd.to_datetime(df.index)
-    df['time_index'] = np.arange(len(df.index))
+    # Ensure the required columns exist after sanitation
+    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
+    
     df['hour'] = df.index.hour
     df['dayofweek'] = df.index.dayofweek
-    df['dayofyear'] = df.index.dayofyear
-    df['weekofyear'] = df.index.isocalendar().week.astype(int)
-    df['month'] = df.index.month
     df['quarter'] = df.index.quarter
-    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
+    df['month'] = df.index.month
+    df['year'] = df.index.year
+    df['dayofyear'] = df.index.dayofyear
+    df['dayofmonth'] = df.index.day
+    df['weekofyear'] = df.index.isocalendar().week.astype(int)
+    
+    # Lag and Rolling Window Features (CRITICAL for recursive forecasting)
+    
+    # Lag 24 (The strongest behavioral feature)
+    df['Demand_MW_lag24'] = df[TARGET_COL_SANITIZED].shift(24)
+    
+    # Lag 48 (The weekend/weekday cycle feature)
+    df['Demand_MW_lag48'] = df[TARGET_COL_SANITIZED].shift(48)
 
-    # Convert temperature to the sanitized name expected by the model
-    temp_col_sanitized = sanitize_feature_names([TEMP_COL])[0]
+    # 72-hour rolling mean, lagged by 24 hours (The stability feature)
+    # This feature is calculated over the demand from t-96 to t-24
+    df['Demand_MW_roll72'] = df[TARGET_COL_SANITIZED].shift(24).rolling(window=72).mean()
 
-    # ADDED ROBUST TEMPERATURE FEATURES
-    if temp_col_sanitized in df.columns:
-        df['temp_lag24'] = df[temp_col_sanitized].shift(24)
-        df['temp_roll72'] = df[temp_col_sanitized].rolling(window=72, min_periods=1).mean().shift(1)
-        df['temp_roll168'] = df[temp_col_sanitized].rolling(window=168, min_periods=1).mean().shift(1)
-    else:
-        pass 
-
-    return df
-
-# Target Lag Function (Used only for initial historical data setup)
-def add_lags(df, target_col):
-    target_col_sanitized = sanitize_feature_names([target_col])[0]
-    df[target_col_sanitized] = df[target_col_sanitized] # Ensure sanitized column is used
-    df[f'{target_col_sanitized}_lag24'] = df[target_col_sanitized].shift(24)
-    df[f'{target_col_sanitized}_lag48'] = df[target_col_sanitized].shift(48)
-    df[f'{target_col_sanitized}_roll72'] = df[target_col_sanitized].shift(24).rolling(window=72).mean()
-    return df
+    # Temperature-related features (Assuming temperature is sanitized to a recognizable name)
+    if TEMP_COL_SAN in df.columns:
+        # Lag Temperature by 12 hours (since peak demand often follows temperature drop)
+        df[TEMP_COL_SAN + '_lag12'] = df[TEMP_COL_SAN].shift(12)
+    
+    # Select the columns that were used for training (LightGBM handles the categorical features naturally)
+    feature_cols = [col for col in df.columns if col != TARGET_COL_SANITIZED]
+    
+    return df[feature_cols]
 
 # --- 2. CACHING AND LOADING ---
 
-@st.cache_resource
-def load_model():
-    """Load the trained LightGBM model from file."""
-    try:
-        model = joblib.load(MODEL_FILENAME)
-        st.success("✅ Model loaded successfully!")
-        return model
-    except FileNotFoundError:
-        st.error(f"Error: Model file '{MODEL_FILENAME}' not found. Please ensure it is in the same directory.")
-        return None
-
-# Loads raw data without caching, specifically for the temperature lookup
 @st.cache_data
-def load_raw_data(path):
-    """Load the raw data for temperature lookup without caching/feature engineering."""
+def load_data(file_path):
+    """Loads and preprocesses the historical data."""
     try:
-        df = pd.read_csv(path)
+        df = pd.read_csv(file_path, parse_dates=[DATE_COL], index_col=DATE_COL)
+        df.columns = sanitize_feature_names(df.columns)
+        
+        # Keep only the target and the essential weather feature
+        required_cols = [TARGET_COL_SANITIZED, sanitize_feature_names([TEMP_COL])[0]]
+        df = df[required_cols].dropna()
+
+        # Resample to ensure hourly frequency for lag feature calculation
+        df = df.resample('H').mean()
+        
+        # Only keep data that is recent enough for lags and rolling averages
+        # Drop first few days where lags would be NaN
+        df = df.iloc[96:] 
+
         return df
     except Exception as e:
-        st.error(f"Error loading raw data for temperature lookup: {e}")
-        return None
+        st.error(f"Error loading or processing data: {e}")
+        return pd.DataFrame()
 
-@st.cache_data
-def load_data(path):
-    """Load and preprocess the historical data."""
+@st.cache_resource
+def load_model(file_path):
+    """Loads the pre-trained LightGBM model."""
     try:
-        df = pd.read_csv(path)
-        df.set_index(DATE_COL, inplace=True)
-        df.index = pd.to_datetime(df.index)
-
-        # --- Preprocessing steps from training script ---
-        df = df[df.index <= '2025-06-30 23:00:00'].copy() # Only use historical actuals
-
-        # 1. PERFORM ONE-HOT ENCODING
-        df_encoded = pd.get_dummies(df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
-        
-        # 2. DROP ORIGINAL TEXT COLUMNS AND KEEP ONLY NUMERIC + ENCODED
-        # Note: This is where we implicitly rely on pandas reading the weather data as numeric
-        df_encoded = df_encoded.select_dtypes(exclude=['object', 'category'])
-        
-        # 3. CREATE TIME/LAG FEATURES
-        df_historical_features = create_features(df_encoded.copy())
-        df_historical_features = add_lags(df_historical_features, TARGET_COL).dropna()
-
-        return df_historical_features
+        model = joblib.load(file_path)
+        return model
     except Exception as e:
-        st.error(f"Error loading or preprocessing data: {e}")
+        st.error(f"Error loading model: {e}")
         return None
 
-# --- 3. CORE PREDICTION FUNCTION (MOVED AND CACHED) ---
+# --- 3. RECURSIVE FORECASTING LOGIC ---
 
-# Function to run the heavy recursive forecast
-def generate_forecast_results(historical_df, model, forecast_start_dt, forecast_end_dt, forecast_days):
-    """Handles the full recursive prediction loop and data preparation."""
+# @st.cache_data(show_spinner="Running recursive forecast... This may take a moment.")
+def run_recursive_forecast(historical_df, model, forecast_steps):
+    """
+    Performs a step-by-step recursive forecast.
+    """
+    st.info("Starting recursive prediction. Generating future weather inputs (simulated) and calculating features...")
     
-    # Constants from global scope
-    # Note: These values rely on the global scope being set up correctly before calling this function.
-    EXPECTED_FEATURES = model.feature_name_
-    LAG_COLS = [f'{TARGET_COL_SANITIZED}_lag24', f'{TARGET_COL_SANITIZED}_lag48', f'{TARGET_COL_SANITIZED}_roll72']
-    PREDICTION_COL_NAME = 'Predicted_Demand_MW'
-    FORECAST_BEGIN_DT = pd.to_datetime('2025-07-01 00:00:00')
-
-    # --- Prepare Future Data (Requires the full historical data again for exogenous lookups) ---
-    df_raw = load_raw_data('cleaned_energy_weather_data(1).csv') 
-    if df_raw is None: return None
-
-    df_raw.set_index(DATE_COL, inplace=True)
-    df_raw.index = pd.to_datetime(df_raw.index)
-    df_full_temp = df_raw.copy()
-
-    # --- Recreate 2024 Climatology Forecast for ALL Exogenous Variables ---
-    START_2024_CLIMATOLOGY = '2024-07-01 00:00:00'
-    END_2024_CLIMATOLOGY = '2024-12-31 23:00:00'
-    dates_2025_forecast_index = pd.date_range(start=datetime(2025, 7, 1), end=datetime(2025, 12, 31, 23, 0, 0), freq='h')
+    # 1. Setup Data
+    last_known_time = historical_df.index[-1]
     
-    EXOGENOUS_COLS_RAW = [col for col in df_full_temp.columns if col != TARGET_COL and col not in CATEGORICAL_COLS and col != DATE_COL]
-    
-    temp_history_climatology = df_full_temp.loc[START_2024_CLIMATOLOGY:END_2024_CLIMATOLOGY, EXOGENOUS_COLS_RAW].copy()
+    # Create the index for the forecast (starting immediately after the last known time)
+    forecast_index = pd.date_range(start=last_known_time + timedelta(hours=1), 
+                                   periods=forecast_steps, 
+                                   freq='H')
 
-    if len(temp_history_climatology) != len(dates_2025_forecast_index):
-        st.error("Climatology data length mismatch. Cannot proceed.") 
-        return None
+    # Create the DataFrame to hold the forecast and simulated future features
+    # NOTE: Future temp is simulated by repeating historical patterns.
+    future_temp_data = np.tile(historical_df[sanitize_feature_names([TEMP_COL])[0]].iloc[-96:].values, 
+                               (forecast_steps // 96) + 1)[:forecast_steps]
+
+    # Initialize the forecast DataFrame
+    df_forecast = pd.DataFrame(index=forecast_index)
+    df_forecast[sanitize_feature_names([TEMP_COL])[0]] = future_temp_data
+    df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
+
+    # Combine historical and future data
+    df_combined = pd.concat([historical_df, df_forecast])
     
-    future_exog_climatology_df = pd.DataFrame(
-        temp_history_climatology.values, 
-        index=dates_2025_forecast_index, 
-        columns=temp_history_climatology.columns
+    # 2. Perform Recursive Loop
+    for t in forecast_index:
+        
+        # Create a temporary DataFrame for feature calculation
+        df_temp = df_combined.loc[:t].copy() 
+        
+        # Use the most recent actuals/predictions to calculate features for time t
+        features_t = create_features(df_temp.tail(48+72)).tail(1)
+        
+        # Select the columns needed for the model
+        X_t = features_t[model.feature_name_]
+
+        # Predict the demand for time t
+        pred_t = model.predict(X_t)[0]
+
+        # Store the prediction (CRITICAL: used as input for the next step)
+        df_combined.loc[t, TARGET_COL_SANITIZED] = pred_t
+
+    # Final forecast is the predicted portion of the combined DataFrame
+    final_forecast_df = df_combined.loc[forecast_index].rename(
+        columns={TARGET_COL_SANITIZED: 'Predicted_Demand_MW'}
     )
-    future_exog_climatology_df[TARGET_COL] = np.nan 
+    st.success("Forecast complete. Data is ready for analysis!")
+    return final_forecast_df
 
-    # --- Add Categorical Placeholders ---
-    for col in CATEGORICAL_COLS:
-        if col == 'Time_of_Day':
-            future_exog_climatology_df[col] = np.where(future_exog_climatology_df.index.hour.isin(range(6, 18)), 'Day', 'Night')
-        elif col == 'Detailed_Time_of_Day':
-            future_exog_climatology_df[col] = future_exog_climatology_df.index.hour.map(lambda h: 
-                'Morning' if h in range(5, 12) else 
-                'Noon' if h in range(12, 17) else 
-                'Evening' if h in range(17, 22) else 
-                'Night'
-            ).fillna('Night') 
-        elif col == 'MeasureItem':
-            future_exog_climatology_df[col] = 'Monthly Hourly Load Values'
-        elif col == 'CountryCode':
-            future_exog_climatology_df[col] = 'NL'
-        elif col in ['CreateDate', 'UpdateDate']:
-            future_exog_climatology_df[col] = '03-03-2025 12:24:13' 
+# --- 4. STREAMLIT APP LAYOUT ---
 
-    future_exog_df_encoded = pd.get_dummies(future_exog_climatology_df, columns=CATEGORICAL_COLS, prefix=CATEGORICAL_COLS)
-    future_exog_df_encoded = create_features(future_exog_df_encoded.copy())
-    
-    # --- Combine and Final Alignment ---
-
-    df_combined = pd.concat([historical_df[[TARGET_COL_SANITIZED]], future_exog_df_encoded], axis=0)
-    df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
-
-    idx_full_forecast = pd.date_range(start=FORECAST_BEGIN_DT, end=forecast_end_dt, freq='h')
-    df_temp = df_combined.loc[idx_full_forecast].copy()
-
-    future_df = pd.DataFrame(0, index=idx_full_forecast, columns=EXPECTED_FEATURES)
-
-    for col in df_temp.columns:
-        if col in future_df.columns:
-            future_df[col] = df_temp[col]
-
-    for col in EXPECTED_FEATURES:
-        if col in future_df.columns:
-            future_df[col] = pd.to_numeric(future_df[col], errors='coerce').astype(float)
-            
-    # --- Recursive Prediction Loop ---
-
-    last_actuals = historical_df[TARGET_COL_SANITIZED].tail(72).copy()
-    s_predictions = pd.Series(index=idx_full_forecast, dtype=float)
-    
-    # Use st.info instead of st.write inside the loop (faster)
-    st.info(f"Calculating full recursive path from **{FORECAST_BEGIN_DT}** to **{forecast_end_dt}**...") 
-
-    # IMPORTANT: Removed st.write from inside the loop to speed up rendering
-    for i, current_index in enumerate(idx_full_forecast):
-        X_current = future_df.loc[[current_index]].copy()
-        s_latest = pd.concat([last_actuals, s_predictions.dropna()]).sort_index()
-
-        # --- ROBUST LAG CALCULATION ---
-        X_current.at[current_index, LAG_COLS[0]] = s_latest.get(current_index - pd.Timedelta(hours=24))
-        X_current.at[current_index, LAG_COLS[1]] = s_latest.get(current_index - pd.Timedelta(hours=48))
-        
-        roll72_window_end = current_index - pd.Timedelta(hours=24)
-        roll72_window_start = roll72_window_end - pd.Timedelta(hours=72)
-        
-        if s_latest.loc[roll72_window_start:roll72_window_end].empty:
-            roll72_val = np.nan
-        else:
-            roll72_val = s_latest.loc[roll72_window_start:roll72_window_end].mean()
-            
-        X_current.at[current_index, LAG_COLS[2]] = roll72_val
-        # ------------------------------
-
-        if not np.isnan(X_current.at[current_index, LAG_COLS[2]]):
-            prediction = model.predict(X_current[EXPECTED_FEATURES])[0]
-        else:
-            prediction = np.nan
-
-        s_predictions.loc[current_index] = prediction
-
-    # --- Finalize and Filter Results ---
-    future_df[PREDICTION_COL_NAME] = s_predictions
-    
-    df_display_window = future_df.loc[forecast_start_dt:forecast_end_dt].copy()
-    df_plot = df_display_window.dropna(subset=[PREDICTION_COL_NAME]) 
-    
-    # Calculate 90th percentile threshold
-    shortage_threshold = historical_df[TARGET_COL_SANITIZED].quantile(0.90) 
-
-    if df_plot.empty:
-        st.error(f"Cannot display results. Please ensure your start date is at least 72 hours after {FORECAST_BEGIN_DT.date()}.")
-        return None
-
-    # Return all necessary results
-    return {
-        'df_plot': df_plot,
-        'shortage_threshold': shortage_threshold,
-        'PREDICTION_COL_NAME': PREDICTION_COL_NAME,
-        'EXPECTED_FEATURES': EXPECTED_FEATURES,
-        'forecast_start_dt': forecast_start_dt,
-        'forecast_end_dt': forecast_end_dt,
-        'forecast_days': forecast_days
-    }
-
-
-# --- 4. STREAMLIT APP CORE ---
-
-st.set_page_config(
-    page_title="Dutch Energy Demand Forecast",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.title("💡  Peak Energy Demand Prediction Dashboard")
-st.markdown("Forecasting hourly energy demand in The Netherlands using LightGBM.")
-
-# Initialize session state for caching results
-if 'forecast_data' not in st.session_state:
-    st.session_state.forecast_data = None
-if 'last_run_params' not in st.session_state:
-    st.session_state.last_run_params = {}
-
-# --- Load Data and Model ---
-historical_df = load_data('cleaned_energy_weather_data(1).csv')
-model = load_model()
-
-if historical_df is not None and model is not None:
-    # Get the last actual demand data for lag calculation
-    EXPECTED_FEATURES = model.feature_name_
-    LAG_COLS = [f'{TARGET_COL_SANITIZED}_lag24', f'{TARGET_COL_SANITIZED}_lag48', f'{TARGET_COL_SANITIZED}_roll72']
-
-    # --- Sidebar Configuration ---
-    st.sidebar.header("Prediction Settings")
-
-    # User selects the forecast start date
-    max_forecast_date = datetime(2025, 12, 31, 23, 0, 0) 
-
-    forecast_start_date_input = st.sidebar.date_input(
-        "Forecast Start Date (Day After Last Actual Data)",
-        value=datetime(2025, 7, 1).date(), 
-        min_value=datetime(2025, 7, 1).date(),
-        max_value=max_forecast_date.date(),
-        key='forecast_date_input'
-    )
-
-    # Convert date input to the required datetime object for indexing
-    forecast_start_dt = pd.to_datetime(forecast_start_date_input).floor('D')
-
-    # User selects the forecast horizon (REDUCED MAX from 60 to 30 for faster runtimes)
-    forecast_days = st.sidebar.slider("Forecast Horizon (Days)", min_value=1, max_value=30, value=7, key='forecast_days_slider')
-
-    # Calculate the full forecast end date (hourly data)
-    forecast_end_dt = forecast_start_dt + pd.Timedelta(days=forecast_days) - pd.Timedelta(hours=1)
-    
-    st.sidebar.markdown("---")
-
-    # Define current parameters for caching check
-    current_params = {
-        'start_dt': forecast_start_dt,
-        'days': forecast_days
-    }
-    
-    # --- Prediction Button ---
-    # The button triggers the computation and updates session state
-    if st.sidebar.button("Run Forecast", type="primary"):
-        with st.spinner(f"Running recursive forecast for {forecast_days} days..."):
-            results = generate_forecast_results(historical_df, model, forecast_start_dt, forecast_end_dt, forecast_days)
-            if results:
-                st.session_state.forecast_data = results
-                st.session_state.last_run_params = current_params
-                st.success(f"Forecast Complete! Results for **{forecast_start_dt.date()}** to **{forecast_end_dt.date()}** stored in cache.")
-            else:
-                st.error("Forecast failed to generate results.")
-    
-    # --- Display Forecast Results (ALWAYS runs if data is available in state) ---
-    if st.session_state.forecast_data:
-        
-        # Unpack results from session state
-        results = st.session_state.forecast_data
-        df_plot = results['df_plot']
-        shortage_threshold = results['shortage_threshold']
-        PREDICTION_COL_NAME = results['PREDICTION_COL_NAME']
-        EXPECTED_FEATURES = results['EXPECTED_FEATURES']
-        
-        # Use cached parameters for display headings
-        start_date = st.session_state.last_run_params['start_dt'].date()
-        end_date = (st.session_state.last_run_params['start_dt'] + pd.Timedelta(days=st.session_state.last_run_params['days']) - pd.Timedelta(hours=1)).date()
-
-        st.subheader(f"Forecast Results ({start_date} to {end_date})")
-
-        # Shortage analysis (Uses 90th percentile)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric(label="Peak Predicted Demand", value=f"{df_plot[PREDICTION_COL_NAME].max():,.2f} MW")
-        with col2:
-            st.metric(label="Shortage Threshold (90th Percentile)", value=f"{shortage_threshold:,.2f} MW")
-
-        shortage_hours = df_plot[df_plot[PREDICTION_COL_NAME] > shortage_threshold]
-
-        if not shortage_hours.empty:
-            st.warning(f"🚨 **HIGH DEMAND ALERT:** Predicted demand exceeds the 90th percentile threshold during **{len(shortage_hours)} hours** in the forecast period. This requires proactive planning.")
-            st.dataframe(shortage_hours.sort_values(PREDICTION_COL_NAME, ascending=False).head(), use_container_width=True)
-        else:
-            st.info("Predicted demand is below the 90th percentile threshold for high-stress events.")
-
-
-        # Plotting the forecast
-        st.subheader("Hourly Demand Forecast")
-        st.line_chart(df_plot, y=PREDICTION_COL_NAME)
-
-        st.subheader("Raw Data Preview")
-        st.dataframe(df_plot[[PREDICTION_COL_NAME] + [f for f in EXPECTED_FEATURES if f in df_plot.columns]].head(10), use_container_width=True)
-
-    # --- 5. Historical Demand Variance Analysis (New Section) ---
-    st.subheader("📊 Historical Demand Variance by Time of Day and Temperature")
-    st.markdown("Analyze how the historical average energy demand (MW) changes throughout the day under different temperature conditions.")
+def display_historical_variance(historical_df):
+    """Displays the historical demand by hour and temperature category."""
+    st.subheader("2. Historical Demand Variance (EDA)")
+    st.markdown("This chart confirms the strong relationship between **Time of Day** and **Temperature**.")
 
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
 
@@ -392,7 +188,9 @@ if historical_df is not None and model is not None:
     df_analysis = historical_df.copy()
 
     # Apply categorization
-    if TEMP_COL_SAN in df_analysis.columns and 'hour' in df_analysis.columns:
+    df_analysis['hour'] = df_analysis.index.hour
+    
+    if TEMP_COL_SAN in df_analysis.columns:
         df_analysis['Temp_Category'] = df_analysis[TEMP_COL_SAN].apply(categorize_temp)
 
         # Group by hour and temperature category, then calculate mean demand
@@ -405,4 +203,140 @@ if historical_df is not None and model is not None:
         else:
             st.warning("Historical analysis data is empty or missing required columns.")
     else:
-        st.error(f"Temperature column ('{TEMP_COL_SAN}') or 'hour' column not found in the historical data for variance analysis.")
+        st.warning(f"Required column for variance analysis ({TEMP_COL_SAN}) is missing.")
+
+def display_forecast_and_peak(df_full_forecast):
+    """
+    Filters the forecast to the Oct 1 - Dec 31 window and displays the peak risk.
+    """
+    st.header("📈 Q4 2025 Energy Demand Risk Forecast")
+
+    # Define the period the user wants to see: Oct 1 to Dec 31
+    DISPLAY_START_DATE = datetime(2025, 10, 1, 0, 0, 0)
+    
+    # Filter the forecast data to the relevant Q4 period
+    df_forecast = df_full_forecast.loc[DISPLAY_START_DATE:].copy()
+    
+    if df_forecast.empty:
+        st.warning(f"The generated forecast does not contain data starting from {DISPLAY_START_DATE.strftime('%Y-%m-%d')}.")
+        return
+
+    # --- 1, 2, 3. Find, Extract, and Display the Global Peak in the Q4 window ---
+    
+    if 'Predicted_Demand_MW' not in df_forecast.columns:
+        st.error("Forecast column 'Predicted_Demand_MW' not found after filtering.")
+        return
+
+    # Find the row with the maximum predicted demand *within the Q4 window*
+    peak_row_index = df_forecast['Predicted_Demand_MW'].idxmax()
+    
+    # Extract the peak hour, date, and value
+    peak_demand = df_forecast.loc[peak_row_index, 'Predicted_Demand_MW']
+    peak_hour = peak_row_index.strftime('%H:%M')
+    peak_date = peak_row_index.strftime('%Y-%m-%d')
+    
+    st.subheader("Actionable Insight: Highest Predicted Peak Risk")
+
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Highlight the peak value using st.metric
+        st.metric(
+            label="Critical Peak Demand Level",
+            value=f"{peak_demand:,.0f} MW",
+            delta=f"Forecasted Peak Time: {peak_hour}", 
+            delta_color="off" # Remove the default green/red coloring
+        )
+    with col2:
+        # Use a text block for the specific date
+        st.markdown(f"""
+        <div style="padding: 10px; border: 1px solid #E9573E; border-left: 5px solid #E9573E; border-radius: 5px; height: 100px; background-color: #ffeaea;">
+            <p style="margin-bottom: 5px; font-size: 14px; color: #555;">Worst-Case Date</p>
+            <h3 style="margin: 0; color: #E9573E;">{peak_date}</h3>
+            <p style="margin: 0; font-size: 12px; color: #999;">The moment requiring peak resource allocation in Q4.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # --- 4. Plot the Forecast with Annotation ---
+    
+    st.subheader(f"Q4 2025 Forecast ({DISPLAY_START_DATE.strftime('%b %d')} to {peak_row_index.strftime('%b %d')})")
+    
+    df_plot = df_forecast[['Predicted_Demand_MW']].copy()
+    
+    # Create a secondary column for highlighting the peak point
+    df_plot['Peak_Highlight'] = df_plot['Predicted_Demand_MW']
+    # Set all values except the peak to NaN, so only the peak point is plotted
+    df_plot.loc[df_plot.index != peak_row_index, 'Peak_Highlight'] = pd.NA
+    
+    st.line_chart(df_plot, use_container_width=True, y=['Predicted_Demand_MW', 'Peak_Highlight'])
+    
+    st.caption("The recursive forecast for Q4 2025, with the single highest demand hour visually highlighted (Orange Dot).")
+
+# --- MAIN EXECUTION ---
+
+def main():
+    st.set_page_config(layout="wide")
+    st.title("💡 Predictive Energy Demand Risk Platform")
+    st.markdown("#### LightGBM Recursive Forecast for Dutch Neighborhood Demand Peaks")
+
+    # Load resources
+    historical_df = load_data('cleaned_energy_weather_data(1).csv')
+    model = load_model(MODEL_FILENAME)
+    
+    if historical_df.empty or model is None:
+        return
+
+    # 1. Historical Data Info
+    st.sidebar.header("Data & Model Info")
+    st.sidebar.success(f"Historical Data Loaded: {historical_df.shape[0]} records")
+    st.sidebar.success(f"Model Loaded: {model.__class__.__name__}")
+    st.sidebar.info(f"Last Actual Demand Date: {historical_df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+    
+    # 2. Display EDA
+    display_historical_variance(historical_df)
+    st.markdown("---")
+
+    # 3. Forecast Controls and Execution
+    st.subheader("3. Generate Peak Forecast")
+    
+    # Define the forecast end date (Dec 31, 2025)
+    FORECAST_END_DATE = datetime(2025, 12, 31, 23, 0, 0)
+    last_known_time = historical_df.index[-1]
+
+    # Calculate the required number of steps (hours)
+    # The forecast must run from the end of the historical data to the end date
+    forecast_range = pd.date_range(start=last_known_time + timedelta(hours=1), 
+                                   end=FORECAST_END_DATE, 
+                                   freq='H')
+    FORECAST_HORIZON_HOURS = len(forecast_range)
+
+    # Ensure the calculated horizon is positive and reasonable
+    if FORECAST_HORIZON_HOURS <= 0:
+        st.error("Historical data already covers the target period. Adjust FORECAST_END_DATE.")
+        return
+
+    st.info(f"The recursive model will run **{FORECAST_HORIZON_HOURS} hours** (starting after {last_known_time.strftime('%Y-%m-%d %H:%M')}) to accurately forecast the Q4 risk period.")
+
+    if st.button(f'🚀 Run Forecast until Dec 31, 2025 ({FORECAST_HORIZON_HOURS} hours)', key='run_forecast_btn'):
+        # Clear any old forecast data from the session state
+        if 'df_forecast' in st.session_state:
+            del st.session_state.df_forecast
+        
+        # Run the recursive function
+        df_forecast = run_recursive_forecast(historical_df, model, FORECAST_HORIZON_HOURS)
+        
+        # Store the full result in session state
+        st.session_state.df_forecast = df_forecast
+
+    # 4. Display Forecast
+    if 'df_forecast' in st.session_state and not st.session_state.df_forecast.empty:
+        display_forecast_and_peak(st.session_state.df_forecast)
+    elif st.button('Show Previous Forecast', key='show_forecast_btn', disabled='df_forecast' not in st.session_state):
+        # Allow the user to view the previous forecast if it's stored
+        if 'df_forecast' in st.session_state:
+            display_forecast_and_peak(st.session_state.df_forecast)
+    
+if __name__ == '__main__':
+    main()
