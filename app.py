@@ -18,19 +18,25 @@ MODEL_FILENAME = 'lightgbm_demand_model.joblib'
 DATA_FILENAME = 'cleaned_energy_weather_data(1).csv'
 
 # List of categorical columns from the original dataset
-CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
+CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'CreateDate', 'UpdateDate', 'Value_ScaleTo100', 'DateShort', 'TimeFrom', 'TimeTo', 'index']
+
+# The 'Time_of_Day' columns are features needed for prediction, so they are not in CATEGORICAL_COLS 
+# (which are typically dropped, but we need these specific ones).
 TARGET_COL_SANITIZED = 'Demand_MW' 
 
 # Define prediction limits
-FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1).date() # Changed to .date() for st.date_input
-FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31).date() # Changed to .date()
+FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1).date() 
+FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31).date() 
 
 # --- 1. CACHING FUNCTIONS (To solve the 2-minute delay) ---
 
 # Use st.cache_data for functions that return data frames/objects
 @st.cache_data
 def load_and_prepare_data(filepath, date_col):
-    """Loads and preprocesses data, caching the result to run only once."""
+    """
+    Loads and preprocesses data, caching the result to run only once.
+    This resolves the slowness caused by reading the large CSV repeatedly.
+    """
     st.info("⏳ Initial data loading and processing... This happens only once.")
     try:
         # Load the data (The slow step)
@@ -38,16 +44,37 @@ def load_and_prepare_data(filepath, date_col):
         
         # Ensure date column is datetime and drop duplicates/NaNs
         df[date_col] = pd.to_datetime(df[date_col])
-        df = df.dropna(subset=[TARGET_COL, TEMP_COL, 'Time_of_Day']).drop_duplicates()
         
-        # Keep only the features needed for prediction
-        feature_cols = [col for col in df.columns if col not in CATEGORICAL_COLS + [TARGET_COL, 'index']]
-        df = df[[DATE_COL, TARGET_COL] + feature_cols + ['Time_of_Day', 'Detailed_Time_of_Day']].set_index(DATE_COL)
+        # Drop rows where critical columns are missing
+        df = df.dropna(subset=[TARGET_COL, TEMP_COL, 'Time_of_Day']).drop_duplicates()
+
+        # --- FIX: Ensure unique and correct column selection for set_index ---
+        # 1. Start with the target column
+        final_cols = [TARGET_COL]
+        
+        # 2. Add all non-categorical/metadata columns (including weather features)
+        all_feature_cols = [col for col in df.columns if col not in CATEGORICAL_COLS]
+        final_cols.extend(all_feature_cols)
+        
+        # 3. Ensure the list contains only unique column names
+        final_cols = list(pd.unique(final_cols))
+        
+        # 4. Remove the date column from the feature list, as it's used for the index
+        if date_col in final_cols:
+            final_cols.remove(date_col) 
+            
+        # 5. FINAL SELECTION: Use the unique list and set the datetime column as the index
+        # This resolves the ValueError
+        df = df[[date_col] + final_cols].set_index(date_col) 
+        # ----------------------------------------------------------------------
         
         st.success("Data loaded and ready!")
         return df
     except FileNotFoundError:
-        st.error(f"Error: Data file {filepath} not found.")
+        st.error(f"Error: Data file {filepath} not found. Ensure it is in the app directory.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"An unexpected error occurred during data loading: {e}")
         return pd.DataFrame()
 
 # Use st.cache_resource for objects that should persist, like ML models
@@ -60,7 +87,7 @@ def load_model(filepath):
         st.success("Model loaded successfully!")
         return model
     except FileNotFoundError:
-        st.error(f"Error: Model file {filepath} not found.")
+        st.error(f"Error: Model file {filepath} not found. Ensure it is in the app directory.")
         return None
     except Exception as e:
         st.error(f"Error loading model: {e}")
@@ -112,7 +139,7 @@ def map_hour_to_detailed_time_of_day(hour):
     elif 9 <= hour < 12: return 'Late Morning'
     elif 12 <= hour < 15: return 'Early Afternoon'
     elif 15 <= hour < 17: return 'Late Afternoon'
-    elif 17 <= hour < 20: return 'Early Evening' # Dinner hour peak area
+    elif 17 <= hour < 20: return 'Early Evening' 
     elif 20 <= hour < 24: return 'Late Evening'
     else: return 'Night'
 
@@ -124,9 +151,11 @@ def predict_24h_demand(target_date, model, df_data, target_col):
         # Create a 24-hour timestamp index for the target day
         start_dt = datetime.combine(target_date, time(0, 0))
         end_dt = start_dt + timedelta(days=1)
+        # Use closed='left' for hourly data
         future_index = pd.date_range(start=start_dt, end=end_dt, freq='H', closed='left')
         
         # 1. Extract known weather data for the target day from the full dataset
+        # .loc[] is used here to quickly retrieve the data needed for the target date
         df_target = df_data.loc[future_index].copy()
         
         # 2. Add Time Features
@@ -140,7 +169,6 @@ def predict_24h_demand(target_date, model, df_data, target_col):
         df_target.columns = sanitize_feature_names(df_target.columns)
         
         # 5. Select features used in the trained model
-        # NOTE: This assumes the model features are a subset of the dataframe columns.
         model_features = model.feature_name() 
         X_target = df_target[model_features]
         
@@ -150,6 +178,7 @@ def predict_24h_demand(target_date, model, df_data, target_col):
         df_result = pd.DataFrame(predictions, index=future_index, columns=[f'Predicted_{target_col}'])
         
         # Merge key input columns back for visualization/context
+        # Note: Temperature column name is sanitized in df_target
         df_result['Temperature'] = df_target['Temperature_0_1_degrees_Celsius'] / 10 
         df_result['Time_of_Day'] = df_target['Time_of_Day']
         df_result['Detailed_Time_of_Day'] = df_target['Detailed_Time_of_Day']
@@ -182,8 +211,8 @@ def display_daily_forecast_chart(df_forecast, target_date):
     # Line chart for demand
     line = base.mark_line(point=True).encode(
         y=alt.Y('Predicted_Demand_MW', title='Demand (MW)'),
-        color=alt.value("#005C99"), # Blue for the main line
-        tooltip=['Hour', alt.Tooltip('Predicted_Demand_MW', format=',.0f'), 'Detailed_Time_of_Day']
+        color=alt.value("#005C99"), 
+        tooltip=['Hour', alt.Tooltip('Predicted_Demand_MW', format=',.0f'), 'Detailed_Time_of_Day', alt.Tooltip('Temperature', format='.1f')]
     )
     
     # Point for the peak demand
@@ -254,12 +283,13 @@ def main():
 
     # --- 5.1 Load Cached Resources ---
     # These functions run ONCE and will be fast on subsequent runs.
+    # The caching resolves the 2-minute delay.
     df_data = load_and_prepare_data(DATA_FILENAME, DATE_COL)
     model = load_model(MODEL_FILENAME)
     
     # Check if essential resources are loaded
     if df_data.empty or model is None:
-        st.warning("Cannot run prediction without data or model. Please check file paths.")
+        st.warning("Cannot run prediction without data or model. Please ensure files are correctly named and located.")
         return
 
     # --- 5.2 Header and Introduction ---
@@ -287,13 +317,16 @@ def main():
     st.subheader("2. Run 24-Hour Forecast")
 
     if st.button("Generate Forecast", type="primary"):
+        # Convert to date object for comparison
+        target_date_dt = target_date.date() if isinstance(target_date, datetime) else target_date
+        
         # Check if the date is in the forecast range
-        if target_date < FORECAST_START_DATE_LIMIT or target_date > FORECAST_END_DATE_LIMIT:
+        if target_date_dt < FORECAST_START_DATE_LIMIT or target_date_dt > FORECAST_END_DATE_LIMIT:
             st.error(f"Selected date is outside the valid forecast range ({FORECAST_START_DATE_LIMIT} to {FORECAST_END_DATE_LIMIT}).")
         else:
-            # Run the prediction (this is fast because of cached data/model)
-            with st.spinner(f"Predicting demand for {target_date.strftime('%Y-%m-%d')}..."):
-                df_forecast = predict_24h_demand(target_date, model, df_data, TARGET_COL_SANITIZED)
+            # Run the prediction (now fast due to caching)
+            with st.spinner(f"Predicting demand for {target_date_dt.strftime('%Y-%m-%d')}..."):
+                df_forecast = predict_24h_demand(target_date_dt, model, df_data, TARGET_COL_SANITIZED)
 
             if df_forecast is not None and not df_forecast.empty:
                 st.session_state.daily_forecast = df_forecast
@@ -305,9 +338,9 @@ def main():
                 peak_category = map_hour_to_detailed_time_of_day(peak_row_index.hour)
                 
                 if 'Evening' in peak_category:
-                    st.toast(f"🚨 PEAK ALERT! Predicted peak of {peak_demand:,.0f} MW at {peak_time_interval} (Evening) on {target_date.strftime('%Y-%m-%d')}!", icon='🔥')
+                    st.toast(f"🚨 PEAK ALERT! Predicted peak of {peak_demand:,.0f} MW at {peak_time_interval} (Evening) on {target_date_dt.strftime('%Y-%m-%d')}!", icon='🔥')
                 else:
-                    st.toast(f"✅ Prediction complete. Peak of {peak_demand:,.0f} MW at {peak_time_interval} on {target_date.strftime('%Y-%m-%d')}.", icon='💡')
+                    st.toast(f"✅ Prediction complete. Peak of {peak_demand:,.0f} MW at {peak_time_interval} on {target_date_dt.strftime('%Y-%m-%d')}.", icon='💡')
 
     # --- 5.5 Display Daily Forecast Results ---
     st.subheader("3. Forecast Results")
