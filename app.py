@@ -42,7 +42,9 @@ def sanitize_feature_names(columns):
 def create_features(df):
     """
     Creates all time-based, lag, and rolling window features expected by the model.
-    This function must be consistent with the features generated during training.
+    NOTE: This function is now primarily used for historical data and to define 
+    the logic, but the recursive loop will implement the demand-based features 
+    manually for performance.
     """
     
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
@@ -59,13 +61,14 @@ def create_features(df):
     # Reconstructed feature from the error message
     df['is_weekend'] = df.index.dayofweek.isin([5, 6]).astype(int) 
     
-    # 2. Demand Lag and Rolling Features
+    # 2. Demand Lag and Rolling Features (Only computed correctly when historical data is available)
     if TARGET_COL_SANITIZED in df.columns:
+        # Note: These are heavy operations, which is why we avoid them in the recursive loop
         df['Demand_MW_lag24'] = df[TARGET_COL_SANITIZED].shift(24)
         df['Demand_MW_lag48'] = df[TARGET_COL_SANITIZED].shift(48)
         df['Demand_MW_roll72'] = df[TARGET_COL_SANITIZED].shift(24).rolling(window=72).mean()
 
-    # 3. Temperature Lag and Rolling Features (Reconstructed from error list)
+    # 3. Temperature Lag and Rolling Features
     if TEMP_COL_SAN in df.columns:
         df['temp_lag24'] = df[TEMP_COL_SAN].shift(24)
         df['temp_roll72'] = df[TEMP_COL_SAN].shift(24).rolling(window=72).mean()
@@ -73,7 +76,7 @@ def create_features(df):
         
     # Return all generated columns (minus the target itself)
     feature_cols = [col for col in df.columns if col != TARGET_COL_SANITIZED]
-    return df[feature_cols]
+    return df
 
 # --- 2. CACHING AND LOADING ---
 
@@ -86,8 +89,14 @@ def load_data(file_path):
         df = pd.read_csv(file_path, parse_dates=[DATE_COL], index_col=DATE_COL)
         df.columns = sanitize_feature_names(df.columns)
         df = df.resample('H').first()
+        
+        # NOTE: We keep Time_of_Day and Detailed_Time_of_Day for OHE, but they might be missing/NaN in the forecast section
+        # We need to impute or handle them before OHE if they are NaN in the future.
+        
         df = pd.get_dummies(df, columns=CATEGORICAL_COLS, dummy_na=False)
-        df = df.dropna(subset=[TARGET_COL_SANITIZED])
+        # Only drop rows where the historical target is missing (i.e., train on complete data)
+        df = df.dropna(subset=[TARGET_COL_SANITIZED]) 
+        # Ensure we have enough data for the initial lags (e.g., 168 hours)
         df = df.iloc[168:] 
         return df
     except Exception as e:
@@ -104,67 +113,78 @@ def load_model(file_path):
         st.error(f"Error loading model: {e}")
         return None
 
-# --- 3. RECURSIVE FORECASTING CORE LOGIC ---
+# --- 3. RECURSIVE FORECASTING CORE LOGIC (OPTIMIZED) ---
 
 def _run_recursive_forecast_core(historical_df, model, forecast_steps):
     """
     Core function that runs a step-by-step recursive forecast.
-    It predicts the full path required, including any gap between
-    the historical end and the desired forecast period.
+    Optimized to avoid repeated expensive slicing and roll/lag calculations.
     """
     
     last_known_time = historical_df.index[-1]
     forecast_index = pd.date_range(start=last_known_time + timedelta(hours=1), 
-                                   periods=forecast_steps, 
-                                   freq='H')
+                                     periods=forecast_steps, 
+                                     freq='H')
 
-    # Get the static/weather columns from the historical data
-    static_weather_cols = [col for col in historical_df.columns if col != TARGET_COL_SANITIZED]
+    # Get the feature columns that are NOT demand-dependent (time, weather, OHE)
+    # The historical_df here *already* has OHE, but the forecast section needs it generated.
     
-    # 1. Setup future DataFrame by tiling recent historical weather data (168h cycle)
+    # 1. Setup future DataFrame and pre-calculate STATIC features
     df_forecast = pd.DataFrame(index=forecast_index)
     
-    for col in static_weather_cols:
+    # Identify non-Demand/non-Time/OHE features (Weather) from historical data
+    non_demand_features = [col for col in historical_df.columns if col not in ['Demand_MW_lag24', 'Demand_MW_lag48', 'Demand_MW_roll72', TARGET_COL_SANITIZED]]
+    
+    # --- Feature Imputation for Future Data (Re-using historical pattern) ---
+    for col in non_demand_features:
         if col in historical_df.columns:
             historical_slice = historical_df[col].iloc[-168:]
             tiled_data = np.tile(historical_slice.values, (forecast_steps // 168) + 1)[:forecast_steps]
             df_forecast[col] = tiled_data
         else:
-            df_forecast[col] = 0 
-            
-    # CRITICAL: Ensure OHE features for the future index are correctly set based on the date/time
-    temp_future_df = pd.DataFrame(index=forecast_index)
-    temp_future_df['Time_of_Day'] = temp_future_df.index.hour.map(lambda h: 'Day' if 6 <= h < 18 else 'Night')
-    temp_future_df['Detailed_Time_of_Day'] = temp_future_df.index.hour.map({
-        0: 'Midnight', 1: 'Midnight', 2: 'Midnight', 3: 'Midnight', 4: 'Midnight', 5: 'Midnight',
-        6: 'Morning', 7: 'Morning', 8: 'Morning', 9: 'Morning', 10: 'Morning', 11: 'Morning',
-        12: 'Noon', 13: 'Noon', 14: 'Noon', 15: 'Noon', 16: 'Noon', 17: 'Noon',
-        18: 'Evening', 19: 'Evening', 20: 'Evening', 21: 'Evening', 22: 'Evening', 23: 'Evening'
-    }) 
-
-    future_ohe_df = pd.get_dummies(temp_future_df[['Time_of_Day', 'Detailed_Time_of_Day']], dummy_na=False)
-
-    for col in future_ohe_df.columns:
-        ohe_col_name = sanitize_feature_names([col])[0]
-        if ohe_col_name in df_forecast.columns:
-            df_forecast[ohe_col_name] = future_ohe_df[col].values
+            df_forecast[col] = 0 # Default for missing OHE columns
             
     df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
 
     # Combine historical and future data
     df_combined = pd.concat([historical_df, df_forecast])
     
+    # Pre-calculate ALL time and weather features once on the combined frame
+    df_combined = create_features(df_combined.copy())
+
+    # Setup feature columns
+    model_feature_names = model.feature_name_
+    
     # 2. Perform Recursive Loop
     for t in forecast_index:
-        df_temp = df_combined.loc[:t].copy() 
-        features_t_raw = create_features(df_temp.tail(168)).tail(1)
         
+        # --- OPTIMIZED FEATURE GENERATION (Only for DEMAND LAGS) ---
+        
+        # Get the feature row containing all pre-calculated time/weather features
+        X_t = df_combined.loc[t].to_frame().T.copy()
+        
+        # Calculate lag features using already set values in df_combined
+        lag24_dt = t - timedelta(hours=24)
+        lag48_dt = t - timedelta(hours=48)
+        
+        # Lag 24 and 48: Directly retrieve from df_combined
+        X_t['Demand_MW_lag24'] = df_combined.loc[lag24_dt, TARGET_COL_SANITIZED]
+        X_t['Demand_MW_lag48'] = df_combined.loc[lag48_dt, TARGET_COL_SANITIZED]
+        
+        # Roll 72: Needs 72 hours of data *ending* 24 hours ago
+        roll72_index = pd.date_range(end=t - timedelta(hours=24), periods=72, freq='H')
+        X_t['Demand_MW_roll72'] = df_combined.loc[roll72_index, TARGET_COL_SANITIZED].mean()
+        
+        # --- End Optimized Feature Generation ---
+
         try:
-            X_t = features_t_raw.reindex(columns=model.feature_name_, fill_value=0)
+            # Align features with the model's expectation
+            X_t = X_t.reindex(columns=model_feature_names, fill_value=0)
         except Exception as e:
             st.error(f"Failed to align features for prediction: {e}")
             return pd.DataFrame()
 
+        # Predict and update the combined DataFrame for the next iteration
         pred_t = model.predict(X_t)[0]
         df_combined.loc[t, TARGET_COL_SANITIZED] = pred_t
 
@@ -199,9 +219,9 @@ def run_daily_forecast(historical_df, model, target_date):
     hours_to_predict = int((end_time_of_day - last_known_time).total_seconds() / 3600)
 
     if hours_to_predict <= 0:
-         st.error(f"The selected date is too close to the last known data point ({last_known_time.strftime('%Y-%m-%d %H:%M')}). Please select a later date.")
-         return pd.DataFrame()
-         
+           st.error(f"The selected date is too close to the last known data point ({last_known_time.strftime('%Y-%m-%d %H:%M')}). Please select a later date.")
+           return pd.DataFrame()
+           
     with st.spinner(f"Running recursive forecast for {hours_to_predict} hours up to {target_date.strftime('%Y-%m-%d')}..."):
         # Run the core recursive logic to predict the entire path (gap + target day)
         df_full_path = _run_recursive_forecast_core(historical_df, model, hours_to_predict)
@@ -225,7 +245,7 @@ def map_hour_to_detailed_time_of_day(hour):
 def display_historical_daily_pattern(historical_df):
     """Allows user to select a date and views its 24-hour demand and temperature pattern."""
     st.subheader("1. Interactive Historical Daily Pattern Viewer")
-    st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical  peak.")
+    st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical peak.")
     
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
     
