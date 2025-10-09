@@ -128,11 +128,15 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
     for col in non_demand_features:
         if col in historical_df.columns:
             historical_slice = historical_df[col].iloc[-168:]
-            tiled_data = np.tile(historical_slice.values, (forecast_steps // 168) + 1)[:forecast_steps]
             
-            # --- CRITICAL FIX: Ensure the tiled data is a standard numeric array before assignment ---
-            # This directly addresses the ValueError on line 133 by ensuring the array is a standard float type.
-            df_forecast[col] = tiled_data.astype(np.float64) 
+            # --- CRITICAL FIX: Ensure the source data is a clean float NumPy array before tiling. ---
+            # Use .to_numpy() which is safer, and ensure it's a float array immediately.
+            clean_source_array = historical_slice.to_numpy().astype(np.float64)
+
+            tiled_data = np.tile(clean_source_array, (forecast_steps // 168) + 1)[:forecast_steps]
+            
+            # The tiled_data is now guaranteed to be np.float64, making assignment safe.
+            df_forecast[col] = tiled_data
         else:
             # Default for missing OHE columns is 0.0 
             df_forecast[col] = 0.0
@@ -174,7 +178,8 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
             # Align features with the model's expectation
             X_t = X_t.reindex(columns=model_feature_names, fill_value=0)
             
-            # Use .values to ensure a pure numpy array with float dtype for prediction
+            # Use .astype(np.float64).values to ensure a pure numpy array with float dtype for prediction
+            # This is the standard way to prepare a single row for LightGBM prediction
             X_t_numeric = X_t.astype(np.float64).values
             
         except Exception as e:
