@@ -203,7 +203,7 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
 
 def display_historical_daily_pattern(historical_df):
     """Allows user to select a date and views its 24-hour demand and temperature pattern."""
-    st.subheader("2. Interactive Historical Daily Pattern Viewer")
+    st.subheader("2.1. Interactive Historical Daily Pattern Viewer")
     st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical evening peak.")
     
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
@@ -274,8 +274,8 @@ def display_forecast_time_of_day_analysis(df_full_forecast):
     Allows user to select a date in Q4 2025 and views its 24-hour predicted 
     demand pattern, highlighting the Time of Day effect.
     """
-    st.subheader("4.1. Interactive Forecast Day Analysis (Q4 Focus)")
-    st.markdown("Select a date between **Oct 1 and Dec 31, 2025** to see the predicted 24-hour demand pattern, colored by the time of day. This visually confirms the **Evening Peak** is the highest risk period.")
+    st.subheader("5. Interactive Forecast Daily Pattern Viewer (Q4 Focus)")
+    st.markdown("This viewer works just like the Historical Daily Pattern Viewer (Section 2.1) but uses the **predicted** demand for any day between **Oct 1 and Dec 31, 2025**, visually confirming the **Evening Peak** is the highest risk period.")
     
     # Filter the forecast data to the relevant Q4 period
     DISPLAY_START_DATE = datetime(2025, 10, 1, 0, 0, 0)
@@ -365,7 +365,7 @@ def display_forecast_and_peak(df_full_forecast):
     peak_hour = peak_row_index.strftime('%H:%M')
     peak_date = peak_row_index.strftime('%Y-%m-%d')
     
-    st.subheader("3. Actionable Insight: Highest Predicted Peak Risk")
+    st.subheader("4. Actionable Insight: Highest Predicted Peak Risk")
 
     col1, col2 = st.columns(2)
     
@@ -381,14 +381,14 @@ def display_forecast_and_peak(df_full_forecast):
         <div style="padding: 10px; border: 1px solid #E9573E; border-left: 5px solid #E9573E; border-radius: 5px; height: 100px; background-color: #ffeaea;">
             <p style="margin-bottom: 5px; font-size: 14px; color: #555;">Worst-Case Date</p>
             <h3 style="margin: 0; color: #E9573E;">{peak_date}</h3>
-            <p style="margin: 0; font-size: 12px; color: #999;">The moment requiring peak resource allocation in Q4.</p>
+            <p style="margin: 0; font-size: 12px; color: #999;'>The moment requiring peak resource allocation in Q4.</p>
         </div>
         """, unsafe_allow_html=True)
     
     st.markdown("---")
     
     # Plot the Forecast with Annotation
-    st.subheader(f"4. Q4 2025 Forecast Overview ({DISPLAY_START_DATE.strftime('%b %d')} to Dec 31)")
+    st.subheader(f"4.1. Q4 2025 Forecast Overview ({DISPLAY_START_DATE.strftime('%b %d')} to Dec 31)")
     
     df_plot = df_forecast[['Predicted_Demand_MW']].copy()
     
@@ -452,10 +452,10 @@ def main():
 
     # 4. Display Forecast
     if 'df_forecast' in st.session_state and not st.session_state.df_forecast.empty:
-        # 3.1 & 3.2 - Peak insight and full Q4 plot
+        # 4. & 4.1 - Peak insight and full Q4 plot
         display_forecast_and_peak(st.session_state.df_forecast) 
         
-        # 4.1 - New interactive daily forecast viewer with time-of-day analysis
+        # 5. Interactive daily forecast viewer with time-of-day analysis
         display_forecast_time_of_day_analysis(st.session_state.df_forecast)
         
     elif st.button('Show Previous Forecast', key='show_forecast_btn', disabled='df_forecast' not in st.session_state):
