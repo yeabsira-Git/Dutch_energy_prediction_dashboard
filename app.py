@@ -129,10 +129,13 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
         if col in historical_df.columns:
             historical_slice = historical_df[col].iloc[-168:]
             tiled_data = np.tile(historical_slice.values, (forecast_steps // 168) + 1)[:forecast_steps]
-            # Ensure the tiled data is a float type before assigning
+            
+            # --- CRITICAL FIX: Ensure the tiled data is a standard numeric array before assignment ---
+            # This directly addresses the ValueError on line 133 by ensuring the array is a standard float type.
             df_forecast[col] = tiled_data.astype(np.float64) 
         else:
-            df_forecast[col] = 0.0 # Default for missing OHE columns
+            # Default for missing OHE columns is 0.0 
+            df_forecast[col] = 0.0
             
     df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
 
@@ -171,15 +174,15 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
             # Align features with the model's expectation
             X_t = X_t.reindex(columns=model_feature_names, fill_value=0)
             
-            # --- CRITICAL FIX: Ensure all columns are standard numeric types (float) ---
-            # This solves the LightGBM ValueError for unsupported pandas dtypes.
-            X_t_numeric = X_t.astype(np.float64)
+            # Use .values to ensure a pure numpy array with float dtype for prediction
+            X_t_numeric = X_t.astype(np.float64).values
             
         except Exception as e:
             st.error(f"Failed to align features for prediction: {e}")
             return pd.DataFrame()
 
         # Predict and update the combined DataFrame for the next iteration
+        # Note: model.predict expects a 2D array, which .values provides
         pred_t = model.predict(X_t_numeric)[0]
         df_combined.loc[t, TARGET_COL_SANITIZED] = pred_t
 
