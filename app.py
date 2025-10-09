@@ -32,15 +32,20 @@ FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31).date()
 def load_and_prepare_data(filepath, date_col):
     """
     Loads and preprocesses data, caching the result to run only once.
-    This resolves the slowness caused by reading the large CSV repeatedly.
+    FIXED: The function now correctly keeps rows where Demand_MW is NaN (future forecast data).
     """
     st.info("⏳ Initial data loading and processing... This happens only once.")
     try:
         df = pd.read_csv(filepath)
         df[date_col] = pd.to_datetime(df[date_col])
-        df = df.dropna(subset=[TARGET_COL, TEMP_COL, 'Time_of_Day']).drop_duplicates()
+        
+        # --- CRITICAL FIX: Removed TARGET_COL from dropna subset ---
+        # We only drop rows missing critical INPUT features (Temperature, Time_of_Day) 
+        # but keep rows where the output (Demand_MW) is missing (i.e., the forecast data).
+        df = df.dropna(subset=[TEMP_COL, 'Time_of_Day']).drop_duplicates()
+        # -----------------------------------------------------------
 
-        # --- FIX for ValueError: Index data must be 1-dimensional ---
+        # --- Column Selection and Indexing Fix ---
         final_cols = [TARGET_COL]
         all_feature_cols = [col for col in df.columns if col not in CATEGORICAL_COLS]
         final_cols.extend(all_feature_cols)
@@ -50,7 +55,12 @@ def load_and_prepare_data(filepath, date_col):
             final_cols.remove(date_col) 
             
         df = df[[date_col] + final_cols].set_index(date_col) 
-        # -----------------------------------------------------------
+        
+        # --- Index Mismatch Fix ---
+        df.index = df.index.tz_localize(None) 
+        df = df.sort_index()
+        df = df.asfreq('H') 
+        # ---------------------------
         
         st.success("Data loaded and ready!")
         return df
@@ -129,10 +139,10 @@ def predict_24h_demand(target_date, model, df_data, target_col):
         start_dt = datetime.combine(target_date, time(0, 0))
         end_dt = start_dt + timedelta(days=1)
         
-        # --- FIX: Replaced 'closed' with 'inclusive' for Pandas compatibility ---
+        # FIX: Using inclusive='left' for compatibility and 24 hours
         future_index = pd.date_range(start=start_dt, end=end_dt, freq='H', inclusive='left')
-        # -----------------------------------------------------------------------
-
+        
+        # Retrieve the 24 hours of data from the cached data frame
         df_target = df_data.loc[future_index].copy()
         
         df_target = create_time_features(df_target)
@@ -172,7 +182,7 @@ def display_daily_forecast_chart(df_forecast, target_date, df_data):
     history_start = forecast_start - timedelta(days=7)
     
     # 2. Extract Historical Data (Actual Demand)
-    # Using df_data which contains the historical Demand_MW
+    # Filter for target column and rename
     df_history = df_data.loc[history_start:forecast_start - timedelta(hours=1), [TARGET_COL]].copy()
     df_history = df_history.rename(columns={TARGET_COL: 'Demand_MW'}).reset_index()
     df_history['Type'] = 'Actual Demand'
@@ -193,7 +203,7 @@ def display_daily_forecast_chart(df_forecast, target_date, df_data):
     base = alt.Chart(df_plot).encode(
         x=alt.X('Hour', title='Date and Time', axis=alt.Axis(format='%Y-%m-%d %H:%M')),
         y=alt.Y('Demand_MW', title='Demand (MW)'),
-        color=alt.Color('Type', legend=alt.Legend(title="Demand Type")),
+        color=alt.Color('Type', legend=alt.Legend(title="Demand Type"), scale=alt.Scale(range=['#2c7bb6', '#d7191c'])), # Blue for actual, Red for predicted
         tooltip=['Hour', alt.Tooltip('Demand_MW', format=',.0f'), 'Type']
     ).properties(
         title=f"Energy Demand: Last 7 Days (Actual) vs. {target_date.strftime('%Y-%m-%d')} (Predicted)"
@@ -271,7 +281,6 @@ def main():
     st.set_page_config(layout="wide", page_title="Energy Demand Peak Prediction")
 
     # --- 5.1 Load Cached Resources ---
-    # These functions run ONCE and will be fast on subsequent runs.
     df_data = load_and_prepare_data(DATA_FILENAME, DATE_COL)
     model = load_model(MODEL_FILENAME)
     
@@ -312,7 +321,7 @@ def main():
 
             if df_forecast is not None and not df_forecast.empty:
                 st.session_state.daily_forecast = df_forecast
-                st.session_state.target_date = target_date_dt # Store target date for chart title
+                st.session_state.target_date = target_date_dt 
                 
                 peak_row_index = df_forecast['Predicted_Demand_MW'].idxmax()
                 peak_demand = df_forecast.loc[peak_row_index, 'Predicted_Demand_MW']
@@ -329,7 +338,7 @@ def main():
     
     if 'daily_forecast' in st.session_state and not st.session_state.daily_forecast.empty:
         
-        # Display the 24-hour chart, now including historical data
+        # Display the 24-hour chart, including historical data
         display_daily_forecast_chart(st.session_state.daily_forecast, st.session_state.target_date, df_data)
         
         # Display the peak summary and risk warning
