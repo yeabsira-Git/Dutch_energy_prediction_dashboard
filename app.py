@@ -361,7 +361,7 @@ def display_daily_forecast_chart(selected_day_df, selected_date):
 def main():
     st.set_page_config(layout="wide")
     st.title("💡 Predictive Energy Demand Risk Platform")
-    st.markdown("#### Single-Day LightGBM Forecast for Dutch Neighborhood Demand Peaks")
+    st.markdown("#### Daily forecast for Electricity Demand peaks of The Netherlands")
 
     # Load resources
     historical_df = load_data('cleaned_energy_weather_data(1).csv')
@@ -377,7 +377,7 @@ def main():
     st.sidebar.info(f"Last Actual Demand Date: {historical_df.index[-1].strftime('%Y-%m-%d %H:%M')}")
     
     # 2. Display Historical EDA
-    st.subheader("2. Exploratory Data Analysis (EDA)")
+    #st.subheader("2. Exploratory Data Analysis (EDA)")
     display_historical_daily_pattern(historical_df)
 
     # 3. Daily Forecast Controls and Execution
