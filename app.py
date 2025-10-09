@@ -5,6 +5,7 @@ import joblib
 import re
 from datetime import datetime, timedelta
 import lightgbm as lgb
+import altair as alt # Needed for combining charts (optional, but good practice)
 from sklearn.metrics import mean_squared_error
 import warnings
 warnings.filterwarnings("ignore")
@@ -36,8 +37,8 @@ def sanitize_feature_names(columns):
 
 # Feature Engineering Function - CRITICAL: Must mirror training features
 def create_features(df):
-    # Sanitize column names first
-    df.columns = sanitize_feature_names(df.columns)
+    # FIX: Removed redundant column sanitization here. 
+    # Columns must be sanitized only once in load_data to match model.feature_name_.
     
     # Ensure the required columns exist after sanitation
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
@@ -71,6 +72,7 @@ def create_features(df):
     # Select the columns that were used for training (LightGBM handles the categorical features naturally)
     feature_cols = [col for col in df.columns if col != TARGET_COL_SANITIZED]
     
+    # Return features. Note: X_t slicing with model.feature_name_ happens outside this function.
     return df[feature_cols]
 
 # --- 2. CACHING AND LOADING ---
@@ -127,12 +129,13 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
 
     # Create the DataFrame to hold the forecast and simulated future features
     # NOTE: Future temp is simulated by repeating historical patterns.
-    future_temp_data = np.tile(historical_df[sanitize_feature_names([TEMP_COL])[0]].iloc[-96:].values, 
+    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
+    future_temp_data = np.tile(historical_df[TEMP_COL_SAN].iloc[-96:].values, 
                                (forecast_steps // 96) + 1)[:forecast_steps]
 
     # Initialize the forecast DataFrame
     df_forecast = pd.DataFrame(index=forecast_index)
-    df_forecast[sanitize_feature_names([TEMP_COL])[0]] = future_temp_data
+    df_forecast[TEMP_COL_SAN] = future_temp_data
     df_forecast[TARGET_COL_SANITIZED] = np.nan # This will hold our predictions
 
     # Combine historical and future data
@@ -141,14 +144,22 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
     # 2. Perform Recursive Loop
     for t in forecast_index:
         
-        # Create a temporary DataFrame for feature calculation
+        # Create a temporary DataFrame for feature calculation, including the most recent actuals/predictions
+        # We need enough historical/predicted data to calculate all lags and rolling means (96 hours total)
         df_temp = df_combined.loc[:t].copy() 
         
         # Use the most recent actuals/predictions to calculate features for time t
-        features_t = create_features(df_temp.tail(48+72)).tail(1)
+        # We need the last 48+72 hours to ensure roll72 and lag48 are calculated for the *last* row (time t)
+        features_t = create_features(df_temp.tail(48 + 72)).tail(1)
         
         # Select the columns needed for the model
-        X_t = features_t[model.feature_name_]
+        # FIX: The model.feature_name_ contains the exact names the model expects.
+        # We use this list to filter the features created by create_features.
+        try:
+            X_t = features_t[model.feature_name_]
+        except KeyError as e:
+            st.error(f"Model Feature Mismatch: A required feature ({e}) is missing or misnamed in the input data. Check feature engineering consistency.")
+            return pd.DataFrame() # Stop the function on error
 
         # Predict the demand for time t
         pred_t = model.predict(X_t)[0]
@@ -165,10 +176,72 @@ def run_recursive_forecast(historical_df, model, forecast_steps):
 
 # --- 4. STREAMLIT APP LAYOUT ---
 
+def display_daily_pattern(historical_df):
+    """Allows user to select a date and views its 24-hour demand and temperature pattern."""
+    st.subheader("2.1. Interactive Daily Pattern Viewer")
+    st.markdown("Select a date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the evening ramp-up.")
+    
+    TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
+    
+    # Ensure index is datetime and extract dates
+    dates = historical_df.index.normalize().unique()
+    
+    # Get the last date in the historical data as the default
+    default_date = dates[-1].to_pydatetime().date()
+    
+    selected_date = st.date_input(
+        "Select a Historical Date",
+        value=default_date,
+        min_value=dates.min().to_pydatetime().date(),
+        max_value=dates.max().to_pydatetime().date()
+    )
+
+    # Filter data for the selected day
+    selected_day_df = historical_df[historical_df.index.date == selected_date].copy()
+    
+    if selected_day_df.empty:
+        st.warning(f"No data available for {selected_date}.")
+        return
+
+    # Prepare data for plotting
+    selected_day_df['Hour'] = selected_day_df.index.hour
+    selected_day_df['Demand_MW'] = selected_day_df[TARGET_COL_SANITIZED]
+    # Convert Temperature (0.1 C) to Celsius for display
+    selected_day_df['Temperature_C'] = selected_day_df[TEMP_COL_SAN] / 10.0
+    
+    # Altair Charts for dual axis plot
+    
+    # Chart 1: Demand (Left Axis)
+    base = alt.Chart(selected_day_df).encode(
+        x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day')),
+    )
+
+    demand_chart = base.mark_line(point=True, color='#006494').encode(
+        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Demand (MW)', titleColor='#006494')),
+        tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f')]
+    ).properties(
+        title=f"Demand and Temperature on {selected_date.strftime('%Y-%m-%d')}"
+    )
+
+    # Chart 2: Temperature (Right Axis)
+    temp_chart = base.mark_line(point=True, color='#E9573E').encode(
+        y=alt.Y('Temperature_C:Q', axis=alt.Axis(title='Temperature (°C)', titleColor='#E9573E')),
+        tooltip=['Hour:O', alt.Tooltip('Temperature_C:Q', format='.1f')]
+    )
+    
+    # Combine charts using Altair's layering and resolve scales
+    final_chart = alt.layer(demand_chart, temp_chart).resolve_scale(
+        y='independent'
+    ).interactive()
+    
+    st.altair_chart(final_chart, use_container_width=True)
+    st.caption("Energy demand (blue) typically ramps up sharply in the evening, inversely correlated with temperature (orange).")
+    st.markdown("---")
+
 def display_historical_variance(historical_df):
     """Displays the historical demand by hour and temperature category."""
-    st.subheader("2. Historical Demand Variance (EDA)")
-    st.markdown("This chart confirms the strong relationship between **Time of Day** and **Temperature**.")
+    st.subheader("2.2. Mean Demand by Hour and Temperature (Aggregate)")
+    st.markdown("This aggregate chart confirms the strong relationship between **Time of Day** and **Temperature** over the entire historical period.")
 
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
 
@@ -204,6 +277,8 @@ def display_historical_variance(historical_df):
             st.warning("Historical analysis data is empty or missing required columns.")
     else:
         st.warning(f"Required column for variance analysis ({TEMP_COL_SAN}) is missing.")
+    st.markdown("---")
+
 
 def display_forecast_and_peak(df_full_forecast):
     """
@@ -218,7 +293,7 @@ def display_forecast_and_peak(df_full_forecast):
     df_forecast = df_full_forecast.loc[DISPLAY_START_DATE:].copy()
     
     if df_forecast.empty:
-        st.warning(f"The generated forecast does not contain data starting from {DISPLAY_START_DATE.strftime('%Y-%m-%d')}.")
+        st.warning(f"The generated forecast does not contain data starting from {DISPLAY_START_DATE.strftime('%Y-%m-%d')}. Rerun the forecast.")
         return
 
     # --- 1, 2, 3. Find, Extract, and Display the Global Peak in the Q4 window ---
@@ -261,7 +336,7 @@ def display_forecast_and_peak(df_full_forecast):
     
     # --- 4. Plot the Forecast with Annotation ---
     
-    st.subheader(f"Q4 2025 Forecast ({DISPLAY_START_DATE.strftime('%b %d')} to {peak_row_index.strftime('%b %d')})")
+    st.subheader(f"Q4 2025 Forecast ({DISPLAY_START_DATE.strftime('%b %d')} to Dec 31)")
     
     df_plot = df_forecast[['Predicted_Demand_MW']].copy()
     
@@ -295,8 +370,14 @@ def main():
     st.sidebar.info(f"Last Actual Demand Date: {historical_df.index[-1].strftime('%Y-%m-%d %H:%M')}")
     
     # 2. Display EDA
+    st.subheader("2. Exploratory Data Analysis (EDA)")
+    
+    # New feature: Daily Pattern Viewer
+    display_daily_pattern(historical_df)
+
+    # Existing feature: Aggregate Variance
     display_historical_variance(historical_df)
-    st.markdown("---")
+
 
     # 3. Forecast Controls and Execution
     st.subheader("3. Generate Peak Forecast")
