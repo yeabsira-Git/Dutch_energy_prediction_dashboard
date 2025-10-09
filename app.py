@@ -224,8 +224,8 @@ def map_hour_to_detailed_time_of_day(hour):
 
 def display_historical_daily_pattern(historical_df):
     """Allows user to select a date and views its 24-hour demand and temperature pattern."""
-    st.subheader("2.1. Interactive Historical Daily Pattern Viewer")
-    st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical evening peak.")
+    st.subheader("1. Interactive Historical Daily Pattern Viewer")
+    st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical  peak.")
     
     TEMP_COL_SAN = sanitize_feature_names([TEMP_COL])[0]
     
@@ -381,7 +381,7 @@ def main():
     display_historical_daily_pattern(historical_df)
 
     # 3. Daily Forecast Controls and Execution
-    st.subheader("3. Single-Day Peak Forecast")
+    st.subheader("2. Single-Day Peak Forecast")
     st.info(f"Select a day between **{FORECAST_START_DATE_LIMIT.strftime('%Y-%m-%d')}** and **{FORECAST_END_DATE_LIMIT.strftime('%Y-%m-%d')}** to run a minimal recursive prediction.")
 
     col_date, col_btn = st.columns([0.7, 0.3])
@@ -419,7 +419,7 @@ def main():
                     st.toast(f"✅ Prediction complete. Peak of {peak_demand:,.0f} MW at {peak_time_interval} on {target_date.strftime('%Y-%m-%d')}.", icon='💡')
 
     # 4. Display Daily Forecast Results
-    st.subheader("4. Forecast Results")
+    st.subheader("3. Forecast Results")
     
     if 'daily_forecast' in st.session_state and not st.session_state.daily_forecast.empty:
         
