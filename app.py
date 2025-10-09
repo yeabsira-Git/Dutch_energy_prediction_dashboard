@@ -129,9 +129,9 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
         if col in historical_df.columns:
             historical_slice = historical_df[col].iloc[-168:]
             
-            # --- CRITICAL FIX: Ensure the source data is a clean float NumPy array before tiling. ---
-            # Use .to_numpy() which is safer, and ensure it's a float array immediately.
-            clean_source_array = historical_slice.to_numpy().astype(np.float64)
+            # --- CRITICAL FIX: Coerce data to numeric, fill NaN, and then convert to float NumPy array. ---
+            # This handles any hidden object/string dtypes that prevent direct conversion to float.
+            clean_source_array = pd.to_numeric(historical_slice, errors='coerce').fillna(0.0).to_numpy().astype(np.float64)
 
             tiled_data = np.tile(clean_source_array, (forecast_steps // 168) + 1)[:forecast_steps]
             
@@ -179,7 +179,6 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
             X_t = X_t.reindex(columns=model_feature_names, fill_value=0)
             
             # Use .astype(np.float64).values to ensure a pure numpy array with float dtype for prediction
-            # This is the standard way to prepare a single row for LightGBM prediction
             X_t_numeric = X_t.astype(np.float64).values
             
         except Exception as e:
