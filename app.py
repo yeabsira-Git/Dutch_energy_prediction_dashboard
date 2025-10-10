@@ -10,22 +10,6 @@ from sklearn.metrics import mean_squared_error
 import warnings
 warnings.filterwarnings("ignore")
 
-# --- CONFIGURATION (Must match training script) ---
-DATE_COL = 'DateUTC'
-TARGET_COL = 'Demand_MW'
-TEMP_COL = 'Temperature (0.1 degrees Celsius)'
-MODEL_FILENAME = 'lightgbm_demand_model.joblib'
-TEMP_COL_SANITIZED = sanitize_feature_names([TEMP_COL])[0] # Define once
-TARGET_COL_SANITIZED = 'Demand_MW' 
-
-# List of categorical columns from the original dataset
-# NOTE: This list needs to be comprehensive for OHE alignment
-CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
-
-# Define prediction limits
-FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1)
-FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31, 23, 0, 0) # Inclusive end time
-
 # --- 1. UTILITY FUNCTIONS (Feature Engineering & Sanitization) ---
 
 def sanitize_feature_names(columns):
@@ -40,6 +24,23 @@ def sanitize_feature_names(columns):
         col = re.sub(r'_{2,}', '_', col)
         new_cols.append(col)
     return new_cols
+
+# --- CONFIGURATION (Must match training script) ---
+# NOTE: This block is moved here to ensure sanitize_feature_names is defined first (FIX for NameError).
+DATE_COL = 'DateUTC'
+TARGET_COL = 'Demand_MW'
+TEMP_COL = 'Temperature (0.1 degrees Celsius)'
+MODEL_FILENAME = 'lightgbm_demand_model.joblib'
+TEMP_COL_SANITIZED = sanitize_feature_names([TEMP_COL])[0] 
+TARGET_COL_SANITIZED = 'Demand_MW' 
+
+# List of categorical columns from the original dataset
+CATEGORICAL_COLS = ['MeasureItem', 'CountryCode', 'Time_of_Day', 'Detailed_Time_of_Day', 'CreateDate', 'UpdateDate']
+
+# Define prediction limits
+FORECAST_START_DATE_LIMIT = datetime(2025, 7, 1)
+FORECAST_END_DATE_LIMIT = datetime(2025, 12, 31, 23, 0, 0) # Inclusive end time
+
 
 def create_features(df):
     """
@@ -66,11 +67,12 @@ def create_features(df):
     # 3. Temperature Lag and Rolling Features
     if TEMP_COL_SANITIZED in df.columns:
         df['temp_lag24'] = df[TEMP_COL_SANITIZED].shift(24)
-        df['temp_roll72'] = df[TEMP_COL_SANITIZED].shift(24).rolling(window=72).mean().shift(1)
-        df['temp_roll168'] = df[TEMP_COL_SANITIZED].shift(24).rolling(window=168).mean().shift(1)
+        # Shift(1) is removed here for rolling means calculated on the combined set,
+        # as the 'create_features' runs on a copy of the combined set *before* the loop.
+        df['temp_roll72'] = df[TEMP_COL_SANITIZED].shift(24).rolling(window=72, min_periods=1).mean()
+        df['temp_roll168'] = df[TEMP_COL_SANITIZED].shift(24).rolling(window=168, min_periods=1).mean()
         
     # Return all generated columns (minus the target itself)
-    # The feature list will be trimmed to match model.feature_name_ later
     return df
 
 # --- 2. CACHING AND LOADING (MODIFIED TO INCLUDE CLIMATOLOGY) ---
@@ -78,8 +80,8 @@ def create_features(df):
 @st.cache_data(show_spinner="Loading and aligning historical data...")
 def load_data(file_path):
     """
-    Loads, sanitizes all columns, applies one-hot encoding, and PREPARES THE 2025 FORECAST FRAME
-    by appending 2024 climatology for temperature.
+    Loads, sanitizes all columns, and PREPARES THE 2025 FORECAST FRAME
+    by appending 2024 climatology for temperature (FIX for unrealistic weather input).
     """
     try:
         df_hist = pd.read_csv(file_path, parse_dates=[DATE_COL], index_col=DATE_COL)
@@ -101,9 +103,9 @@ def load_data(file_path):
                                             end=FORECAST_END_DATE_LIMIT, 
                                             freq='H')
         
-        # Handle cases where the data doesn't align perfectly (e.g., leap year difference in 2024/2025)
+        # Handle cases where the data doesn't align perfectly 
         if len(temp_history_climatology) < len(dates_2025_forecast):
-             # Pad with last known value if 2024 is shorter than 2025 period
+             # Pad with last known value if 2024 period is shorter than 2025
              pad_needed = len(dates_2025_forecast) - len(temp_history_climatology)
              temp_history_climatology = pd.concat([temp_history_climatology, 
                                                    pd.Series([temp_history_climatology.iloc[-1]] * pad_needed)])
@@ -123,13 +125,16 @@ def load_data(file_path):
         
         # --- Standard Processing Steps ---
         
-        # Fill other non-temp/non-target columns with 0.0 (for OHE alignment)
-        for col in df_hist.columns:
-            if col not in [TARGET_COL_SANITIZED, TEMP_COL_SANITIZED]:
-                 df_full[col] = df_full[col].fillna(0.0)
+        # Fill other non-temp/non-target columns (i.e., OHE columns) with 0.0 in the future period
+        # OHE columns are not yet generated, so this fillna must happen after OHE or we fill the raw categorical columns
         
         # Apply OHE to the full dataset to ensure alignment
         df_full = pd.get_dummies(df_full, columns=CATEGORICAL_COLS, dummy_na=False)
+
+        # Now fill the OHE columns (which are now numeric) in the future frame with 0.0
+        for col in df_full.columns:
+            if col not in [TARGET_COL_SANITIZED, TEMP_COL_SANITIZED] and df_full[col].isna().any():
+                df_full[col] = df_full[col].fillna(0.0)
 
         # Drop NaNs based on the historical target, but keep future NaNs
         df_historical_clean = df_full.loc[df_full.index <= DATASET_END_ACTUAL].dropna(subset=[TARGET_COL_SANITIZED])
@@ -166,47 +171,41 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
     FIX: Removed the old "last 168 hours tiling" of weather features.
     """
     
-    last_known_time = historical_df.index[-1]
+    last_known_time = historical_df.index[historical_df[TARGET_COL_SANITIZED].notna()].max()
     forecast_index = pd.date_range(start=last_known_time + timedelta(hours=1), 
                                      periods=forecast_steps, 
                                      freq='H')
 
-    # 1. Setup future DataFrame (already contains 2024 Climatology-based temp)
-    # The 'historical_df' passed to this function now contains the full historical data PLUS 
+    # The 'historical_df' passed in now contains the full historical data PLUS 
     # the 2025 temperature data (from 2024 climatology) appended at the end.
-    
-    # The 'historical_df' here is actually the 'df_clean' from load_data, which contains 
-    # all data up to 2025-12-31 with the future temp filled.
     df_combined = historical_df.copy()
     
-    # 2. Pre-calculate ALL time and weather features once on the combined frame
-    # NOTE: This step generates temp_lag24, temp_roll72/168 using the 2024 climatology data,
-    # correctly preparing the features needed for the forecast loop.
+    # Pre-calculate ALL time and weather features once on the combined frame
+    # This step generates temp_lag24, temp_roll72/168 using the 2024 climatology data.
     df_combined = create_features(df_combined.copy())
 
     # Setup feature columns
     model_feature_names = model.feature_name_
     
-    # 3. Perform Recursive Loop
+    # 2. Perform Recursive Loop
     for t in forecast_index:
-        
-        # --- OPTIMIZED FEATURE GENERATION (Only for DEMAND LAGS) ---
         
         # Get the feature row containing all pre-calculated time/weather features
         X_t = df_combined.loc[t].to_frame().T.copy()
+        
+        # --- OPTIMIZED FEATURE GENERATION (Only for DEMAND LAGS) ---
         
         # Calculate lag features using already set values in df_combined
         lag24_dt = t - timedelta(hours=24)
         lag48_dt = t - timedelta(hours=48)
         
-        # Lag 24 and 48: Directly retrieve from df_combined
-        # Uses either ACTUAl demand (if t-24 is historical) or PREDICTED demand (if t-24 is forecast)
+        # Lag 24 and 48: Directly retrieve from df_combined (Actual or Predicted Demand)
         X_t['Demand_MW_lag24'] = df_combined.loc[lag24_dt, TARGET_COL_SANITIZED]
         X_t['Demand_MW_lag48'] = df_combined.loc[lag48_dt, TARGET_COL_SANITIZED]
         
         # Roll 72: Needs 72 hours of data *ending* 24 hours ago
         roll72_window_end = t - timedelta(hours=24)
-        roll72_window_start = roll72_window_end - timedelta(hours=71) # 72 periods, so -71 hours
+        roll72_window_start = roll72_window_end - timedelta(hours=71) # 72 periods
         roll72_index = pd.date_range(start=roll72_window_start, end=roll72_window_end, freq='H')
         X_t['Demand_MW_roll72'] = df_combined.loc[roll72_index, TARGET_COL_SANITIZED].mean()
         
@@ -234,8 +233,6 @@ def _run_recursive_forecast_core(historical_df, model, forecast_steps):
     
     return final_forecast_df
 
-# The rest of the script (run_daily_forecast, display functions, and main) remains the same.
-
 # --- 4. DAILY FORECAST EXECUTION ---
 
 def run_daily_forecast(historical_df, model, target_date):
@@ -244,9 +241,8 @@ def run_daily_forecast(historical_df, model, target_date):
     and returns only the 24 hours of the target_date.
     """
     
-    # NOTE: historical_df here is the df_clean from load_data, containing both historical data 
-    # and the future weather (2024 climatology)
-    last_known_time = historical_df.index[historical_df[TARGET_COL_SANITIZED].notna()].max()
+    # Find the last time step with actual demand data
+    last_known_time = historical_df[historical_df[TARGET_COL_SANITIZED].notna()].index[-1]
     
     # Target period: 00:00 on target_date to 23:00 on target_date (24 hours)
     start_time_of_day = datetime.combine(target_date, time(0, 0))
@@ -291,13 +287,13 @@ def display_historical_daily_pattern(historical_df):
     st.markdown("Select a historical date to inspect the 24-hour energy demand (MW) versus temperature (°C) for that specific day, highlighting the typical peak.")
     
     dates = historical_df.index.normalize().unique()
-    default_date = dates[-1].to_pydatetime().date()
+    default_date = dates[dates <= datetime(2025, 6, 30)].max().to_pydatetime().date()
     
     selected_date = st.date_input(
         "Select a Historical Date",
         value=default_date,
-        min_value=dates.min().to_pydatetime().date(),
-        max_value=dates.max().to_pydatetime().date(),
+        min_value=historical_df.index.min().to_pydatetime().date(),
+        max_value=default_date, # Limit to the last actual historical day
         key='historical_date_picker'
     )
 
@@ -422,7 +418,6 @@ def display_daily_forecast_chart(selected_day_df, selected_date):
 def main():
     st.set_page_config(layout="wide")
     st.title("💡 Predictive Dutch Energy Demand Platform: Peak Alert System")
-    #st.markdown("#### Daily forecast for Electricity Demand peaks of The Netherlands")
 
     # Load resources
     # Load data now returns the full historical + 2025 forecast frame with 2024 temp
@@ -442,7 +437,6 @@ def main():
     st.sidebar.info(f"Last Actual Demand Date: {last_actual_date.strftime('%Y-%m-%d %H:%M')}")
     
     # 2. Display Historical EDA
-    #st.subheader("2. Exploratory Data Analysis (EDA)")
     display_historical_daily_pattern(historical_df)
 
     # 3. Daily Forecast Controls and Execution
