@@ -316,15 +316,15 @@ def display_historical_daily_pattern(historical_df):
         x=alt.X('Hour:O', axis=alt.Axis(title='Hour of Day')),
     )
 
-    demand_chart = base.mark_line(point=True, color='#006494').encode(
-        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Demand (MW)', titleColor='#006494')),
+    demand_chart = base.mark_line(point=True, color="#940011").encode(
+        y=alt.Y('Demand_MW:Q', axis=alt.Axis(title='Demand (MW)', titleColor="#940000")),
         tooltip=['Hour:O', alt.Tooltip('Demand_MW:Q', format=',.0f')]
     ).properties(
         title=f"Demand and Temperature on {selected_date.strftime('%Y-%m-%d')}"
     )
 
-    temp_chart = base.mark_line(point=True, color='#E9573E').encode(
-        y=alt.Y('Temperature_C:Q', axis=alt.Axis(title='Temperature (°C)', titleColor='#E9573E')),
+    temp_chart = base.mark_line(point=True, color="#3E66E9").encode(
+        y=alt.Y('Temperature_C:Q', axis=alt.Axis(title='Temperature (°C)', titleColor="#3E5DE9")),
         tooltip=['Hour:O', alt.Tooltip('Temperature_C:Q', format='.1f')]
     )
     
